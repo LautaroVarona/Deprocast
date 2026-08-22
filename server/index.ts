@@ -11,17 +11,26 @@ import { pipelineRouter } from './routes/pipeline.js'
 import { proposalsRouter } from './routes/proposals.js'
 import { personsRouter } from './routes/persons.js'
 import { projectsRouter } from './routes/projects.js'
+import { waitingRouter } from './routes/waiting.js'
 import { quantomosRouter } from './routes/quantomos.js'
 import { graphRouter } from './routes/graph.js'
 import { sandboxesRouter } from './routes/sandboxes.js'
 import { bookmarksRouter } from './routes/bookmarks.js'
 import { agrupacionesRouter } from './routes/agrupaciones.js'
+import { dominiosRouter } from './routes/dominios.js'
+import { geografiaRouter } from './routes/geografia.js'
 import { notebooksRouter } from './routes/notebooks.js'
 import { chatsRouter } from './routes/chats.js'
 import { linksRouter } from './routes/links.js'
 import { entitiesRouter } from './routes/entities.js'
 import { backupRouter } from './routes/backup.js'
+import { runRouter } from './routes/run.js'
 import { feedbackRouter } from './routes/feedback.js'
+import { calendarRouter } from './routes/calendar.js'
+import { amazonaRouter } from './routes/amazona.js'
+import { mapRouter } from './routes/map.js'
+import { deprocastRouter } from './routes/deprocast.js'
+import { dialogoRouter } from './routes/dialogo.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({
@@ -60,20 +69,29 @@ app.use('/api/pipeline', pipelineRouter)
 app.use('/api/proposals', proposalsRouter)
 app.use('/api/persons', personsRouter)
 app.use('/api/projects', projectsRouter)
+app.use('/api/waiting', waitingRouter)
 app.use('/api/quantomos', quantomosRouter)
 app.use('/api/graph', graphRouter)
 app.use('/api/sandboxes', sandboxesRouter)
 app.use('/api/bookmarks', bookmarksRouter)
 app.use('/api/agrupaciones', agrupacionesRouter)
+app.use('/api/dominios', dominiosRouter)
+app.use('/api/geografia', geografiaRouter)
 app.use('/api/notebooks', notebooksRouter)
 app.use('/api/chats', chatsRouter)
 app.use('/api/links', linksRouter)
 app.use('/api/entities', entitiesRouter)
 app.use('/api/backup', backupRouter)
+app.use('/api/run', runRouter)
 app.use('/api/feedback', feedbackRouter)
+app.use('/api/calendar', calendarRouter)
+app.use('/api/amazona', amazonaRouter)
+app.use('/api/map', mapRouter)
+app.use('/api/deprocast', deprocastRouter)
+app.use('/api/dialogo', dialogoRouter)
 
-app.listen(PORT, () => {
-  console.log(`[deprocast] server listening on http://localhost:${PORT}`)
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`[deprocast] server listening on http://127.0.0.1:${PORT}`)
   console.log(`[deprocast] Cohere key: ${cohereKeyFingerprint()}`)
 }).on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {

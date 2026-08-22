@@ -106,7 +106,7 @@ export function BlobComposer({ onChanged }: Props) {
       void (async () => {
         try {
           const res = await api.typeaheadEntities(query, {
-            kinds: ['person', 'agrupacion', 'project'],
+            kinds: ['person', 'agrupacion', 'project', 'dominio'],
             limit: 12,
             scope: 'all',
             signal: ac.signal,
@@ -117,7 +117,8 @@ export function BlobComposer({ onChanged }: Props) {
               (h): h is typeof h & { kind: BlobTagKind } =>
                 h.kind === 'person' ||
                 h.kind === 'project' ||
-                h.kind === 'agrupacion',
+                h.kind === 'agrupacion' ||
+                h.kind === 'dominio',
             )
             .map((h) => ({
               kind: h.kind,

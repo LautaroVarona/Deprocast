@@ -4,11 +4,12 @@ import fs from 'node:fs'
 import { getDb } from '../db.js'
 import type { GraphicElement, NotebookPage } from '../types.js'
 import {
-  analyzeNotebookPage,
   explainNotebookPage,
   extractNotebookEntities,
   isCohereQuotaError,
 } from './cohere.js'
+import { ocrNotebookPage } from './notebookOcr.js'
+import { collectNotebookExplainContext } from './notebookSources.js'
 import { getPage, listPages, rebuildNotebookIndex } from './notebookPages.js'
 import { createEntityProposalsFromEntry } from './entityMatch.js'
 import { embedApprovedEntry, enqueueEmbed } from './embeddings.js'
@@ -39,9 +40,11 @@ export function parseMentionedEntities(raw: unknown): BlobTag[] {
         ? 'project'
         : o.kind === 'agrupacion'
           ? 'agrupacion'
-          : o.kind === 'person'
-            ? 'person'
-            : null
+          : o.kind === 'dominio'
+            ? 'dominio'
+            : o.kind === 'person'
+              ? 'person'
+              : null
     const entity_id = String(o.entity_id ?? '').trim()
     const entity_name = String(o.entity_name ?? '').trim()
     if (!kind || !entity_id) continue
@@ -153,6 +156,16 @@ export function composeExplanation(user: string, ai: string): string {
   const a = ai.trim()
   if (u && a) return `${u}\n${EXPLANATION_SEPARATOR}\n${a}`
   return u || a
+}
+
+/** Peso HITL de la explicación (1–12). Null si no hay valoración. */
+export function clampExplanationWeight(
+  raw: unknown,
+): number | null {
+  if (raw == null || raw === '') return null
+  const n = Math.round(Number(raw))
+  if (!Number.isFinite(n) || n < 1 || n > 12) return null
+  return n
 }
 
 function pageHasAiExplanation(page: {
@@ -495,7 +508,18 @@ async function runVisionForPage(
     `UPDATE pages SET status = 'PendienteVision', updated_at = ? WHERE id = ?`,
   ).run(new Date().toISOString(), page.id)
 
-  const result = await analyzeNotebookPage(abs)
+  const result = await ocrNotebookPage(abs)
+  const { detectBlankPngAsync } = await import('./notebookIngest.js')
+  const ink = !(await detectBlankPngAsync(abs))
+  if (result.is_blank && ink) {
+    result.is_blank = false
+    if (!result.transcription_spatial?.trim()) {
+      result.meta = {
+        ...(result.meta ?? { layout: 'unknown' }),
+        notes: `${result.meta?.notes || ''} modelo dijo vacía pero hay tinta`.trim(),
+      }
+    }
+  }
   const now = new Date().toISOString()
   const graphics = JSON.stringify(result.graphic_elements ?? [])
   const visionMeta = JSON.stringify({
@@ -628,12 +652,14 @@ export async function generateExplanationForPage(
   const graphics = parsePageGraphics(page)
   const user = splitExplanation(page.explanation, page.explanation_user).user
   pushLog('info', 'Generando explicación IA…', notebookId, slotIndex)
+  const extraContext = collectNotebookExplainContext(notebookId, slotIndex)
   const ai = await explainNotebookPage({
     title: page.title || 'Sin título',
     transcription: page.transcription_spatial || '',
     graphic_elements: graphics,
     posicion: page.posicion_visual,
     numero_logico: page.numero_logico,
+    extraContext,
   })
   const composed = composeExplanation(user, ai)
   const now = new Date().toISOString()
@@ -746,6 +772,59 @@ export function enqueueNotebookCorpus(notebookId: string): {
   return { queued, skipped }
 }
 
+/**
+ * Dar por válidas todas las explicaciones IA del cuaderno e integrar al corpus.
+ * Peso por defecto 7 si la hoja aún no tiene explanation_weight.
+ */
+export function enqueueValidateAllExplanations(
+  notebookId: string,
+  defaultWeight = 7,
+): {
+  queued: number
+  skipped: number
+  stamped: number
+} {
+  const weight = clampExplanationWeight(defaultWeight) ?? 7
+  const db = getDb()
+  const pages = listPages(db, notebookId)
+  let queued = 0
+  let skipped = 0
+  let stamped = 0
+  const now = new Date().toISOString()
+
+  for (const page of pages) {
+    if (page.status !== 'Validada') {
+      skipped++
+      continue
+    }
+    if (!pageHasAiExplanation(page)) {
+      skipped++
+      continue
+    }
+    const existing = clampExplanationWeight(page.explanation_weight)
+    if (existing == null) {
+      db.prepare(
+        `UPDATE pages SET explanation_weight = ?, updated_at = ? WHERE id = ?`,
+      ).run(weight, now, page.id)
+      stamped++
+    }
+    try {
+      const res = enqueueNotebookConfirm(notebookId, page.slot_index)
+      if (res.queued) queued++
+      else skipped++
+    } catch {
+      skipped++
+    }
+  }
+
+  pushLog(
+    'info',
+    `Validar todo: ${queued} al corpus, ${stamped} con peso ${weight}, ${skipped} omitida(s)`,
+    notebookId,
+  )
+  return { queued, skipped, stamped }
+}
+
 export async function confirmNotebookPage(
   notebookId: string,
   slotIndex: number,
@@ -779,12 +858,14 @@ export async function confirmNotebookPage(
   const split = splitExplanation(page.explanation, page.explanation_user)
   let explanation = composeExplanation(split.user, split.ai)
   if (!pageHasAiExplanation({ explanation, explanation_user: split.user })) {
+    const extraContext = collectNotebookExplainContext(notebookId, slotIndex)
     const ai = await explainNotebookPage({
       title: page.title || 'Sin título',
       transcription: page.transcription_spatial || '',
       graphic_elements: graphics,
       posicion: page.posicion_visual,
       numero_logico: page.numero_logico,
+      extraContext,
     })
     explanation = composeExplanation(split.user, ai)
   }
@@ -814,18 +895,21 @@ export async function confirmNotebookPage(
   const entryId = page.entry_id || randomUUID()
   const quantomoId = page.quantomo_id || randomUUID()
   const title = (page.title || 'Hoja sin título').trim()
+  const weight = clampExplanationWeight(page.explanation_weight) ?? 7
 
   db.exec('BEGIN')
   try {
     if (page.entry_id) {
       db.prepare(
-        `UPDATE entries SET title = ?, content_raw = ?, status = 'approved', title_manual = 1
+        `UPDATE entries SET title = ?, content_raw = ?, status = 'approved',
+         title_manual = 1, human_weight = ?
          WHERE id = ?`,
-      ).run(title, contentRaw, entryId)
+      ).run(title, contentRaw, weight, entryId)
       db.prepare(
-        `UPDATE quantomos SET title = ?, content = ?, recognized = 1, universe = 'cuaderno'
+        `UPDATE quantomos SET title = ?, content = ?, hermetic_weight = ?,
+         human_weight = ?, suggested_weight = ?, recognized = 1, universe = 'cuaderno'
          WHERE id = ?`,
-      ).run(title, explanation, quantomoId)
+      ).run(title, explanation, weight, weight, weight, quantomoId)
       db.prepare(`DELETE FROM entry_entities_raw WHERE entry_id = ?`).run(
         entryId,
       )
@@ -836,8 +920,9 @@ export async function confirmNotebookPage(
       db.prepare(
         `INSERT INTO entries (
           id, notebook_id, source_type, title, content_raw, vault_path,
-          timestamp_exact, status, created_at, title_manual, original_filename
-        ) VALUES (?, ?, 'notebook_page', ?, ?, ?, ?, 'approved', ?, 1, ?)`,
+          timestamp_exact, status, created_at, title_manual, original_filename,
+          human_weight
+        ) VALUES (?, ?, 'notebook_page', ?, ?, ?, ?, 'approved', ?, 1, ?, ?)`,
       ).run(
         entryId,
         notebookId,
@@ -847,13 +932,14 @@ export async function confirmNotebookPage(
         now,
         now,
         page.image_path ? path.basename(page.image_path) : `slot-${slotIndex}`,
+        weight,
       )
       db.prepare(
         `INSERT INTO quantomos (
           id, entry_id, title, content, hermetic_weight, universe, recognized,
           human_weight, suggested_weight
-        ) VALUES (?, ?, ?, ?, 7, 'cuaderno', 1, 7, 7)`,
-      ).run(quantomoId, entryId, title, explanation)
+        ) VALUES (?, ?, ?, ?, ?, 'cuaderno', 1, ?, ?)`,
+      ).run(quantomoId, entryId, title, explanation, weight, weight, weight)
     }
 
     const insertEntity = db.prepare(`
@@ -880,12 +966,14 @@ export async function confirmNotebookPage(
     db.prepare(
       `UPDATE pages SET
         status = 'Procesada', explanation = ?, explanation_user = ?,
+        explanation_weight = ?,
         entry_id = ?, quantomo_id = ?,
         is_blank = 0, updated_at = ?
        WHERE id = ?`,
     ).run(
       explanation,
       split.user || null,
+      weight,
       entryId,
       quantomoId,
       now,

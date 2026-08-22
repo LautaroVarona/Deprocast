@@ -8,6 +8,7 @@ import type {
   ChatExtraction,
   ChatTipo,
   CohereExtraction,
+  DeproIdaCardProposal,
   OcrFrameResult,
 } from '../types.js'
 import { refinePersonKind } from './nerGuards.js'
@@ -32,6 +33,12 @@ function delay(ms: number): Promise<void> {
 
 const require = createRequire(import.meta.url)
 
+/** @napi-rs/canvas JPEG quality is 0–100 (0.84 would encode at ~1 and yield ~5 KB blobs). */
+function jpegQuality100(q: number): number {
+  if (!Number.isFinite(q) || q <= 0) return 86
+  return q <= 1 ? Math.round(q * 100) : Math.round(q)
+}
+
 async function encodeImageForVision(absPath: string): Promise<{
   dataUrl: string
   bytes: number
@@ -42,7 +49,7 @@ async function encodeImageForVision(absPath: string): Promise<{
     const { createCanvas, loadImage } =
       require('@napi-rs/canvas') as typeof import('@napi-rs/canvas')
     const img = await loadImage(absPath)
-    const maxEdge = 1600
+    const maxEdge = 2048
     const scale = Math.min(1, maxEdge / Math.max(img.width, img.height, 1))
     const width = Math.max(1, Math.round(img.width * scale))
     const height = Math.max(1, Math.round(img.height * scale))
@@ -54,11 +61,16 @@ async function encodeImageForVision(absPath: string): Promise<{
     const canvasBuf = canvas as unknown as {
       toBuffer: (mime: string, quality?: number) => Buffer
     }
-    let quality = 0.84
-    let buf = canvasBuf.toBuffer('image/jpeg', quality)
-    while (buf.length > 3_500_000 && quality > 0.5) {
-      quality -= 0.12
-      buf = canvasBuf.toBuffer('image/jpeg', quality)
+    let quality = 86
+    let buf = canvasBuf.toBuffer('image/jpeg', jpegQuality100(quality))
+    while (buf.length > 3_500_000 && quality > 70) {
+      quality -= 6
+      buf = canvasBuf.toBuffer('image/jpeg', jpegQuality100(quality))
+    }
+    if (buf.length < 12_000 && width * height > 200_000) {
+      console.warn(
+        `[cohere/notebook-vision] JPEG sospechosamente chico (${buf.length} B a ${width}x${height}, q=${quality})`,
+      )
     }
     return {
       dataUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
@@ -103,6 +115,55 @@ function chatTextFromCohere(data: unknown): string {
   return d.text || ''
 }
 
+/** Extrae un campo string aunque el JSON venga truncado o con saltos crudos. */
+function extractJsonStringField(raw: string, key: string): string | null {
+  const re = new RegExp(`"${key}"\\s*:\\s*"`)
+  const m = re.exec(raw)
+  if (!m) return null
+  let i = m.index + m[0].length
+  let out = ''
+  while (i < raw.length) {
+    const ch = raw[i]
+    if (ch === '\\' && i + 1 < raw.length) {
+      const n = raw[i + 1]
+      if (n === 'n') out += '\n'
+      else if (n === 'r') out += '\r'
+      else if (n === 't') out += '\t'
+      else if (n === 'u' && /[0-9a-fA-F]{4}/.test(raw.slice(i + 2, i + 6))) {
+        out += String.fromCharCode(parseInt(raw.slice(i + 2, i + 6), 16))
+        i += 6
+        continue
+      } else {
+        out += n
+      }
+      i += 2
+      continue
+    }
+    if (ch === '"') break
+    if (ch === '\n' || ch === '\r') {
+      out += '\n'
+      i += 1
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function salvageNotebookVisionJson(raw: string): Record<string, unknown> | null {
+  const title = extractJsonStringField(raw, 'title')
+  const transcription = extractJsonStringField(raw, 'transcription_spatial')
+  if (!title && !transcription) return null
+  return {
+    title: title || 'Hoja sin título',
+    transcription_spatial: transcription || '',
+    graphic_elements: [],
+    is_blank: false,
+    meta: { layout: 'unknown', notes: 'json truncado rescatado' },
+  }
+}
+
 function extractJsonObject(raw: string): Record<string, unknown> {
   const cleaned = raw.replace(/```json|```/g, '').trim()
   const tryParse = (s: string) => JSON.parse(s) as Record<string, unknown>
@@ -112,7 +173,18 @@ function extractJsonObject(raw: string): Record<string, unknown> {
     const start = cleaned.indexOf('{')
     const end = cleaned.lastIndexOf('}')
     if (start >= 0 && end > start) {
-      return tryParse(cleaned.slice(start, end + 1))
+      try {
+        return tryParse(cleaned.slice(start, end + 1))
+      } catch {
+        /* sigue al salvage */
+      }
+    }
+    const salvaged = salvageNotebookVisionJson(cleaned)
+    if (salvaged) {
+      console.warn(
+        '[cohere/notebook-vision] JSON truncado, se rescató título/transcripción',
+      )
+      return salvaged
     }
     throw new Error(
       `Visión no devolvió JSON (${cleaned.slice(0, 220) || 'vacío'})`,
@@ -135,7 +207,7 @@ function buildAudioSystemPrompt(opts: ExtractOpts): string {
   const weight = opts.humanWeight ?? 7
   const slopRule = opts.slop
     ? `- Este audio es SLOP (voto 1–3). Extraé 1 cuántomo fiel al transcript. Todas las entidades person nuevas van con kind "ruido" (vincular a Ruido, no crear perfiles).`
-    : `- kind (person): fisica | juridica | ficticia | abstracta | ruido.`
+    : `- kind (person): fisica | juridica | ficticia | abstracta | ruido | geografia.`
   return `Eres el extractor hermético de Deprocast. Recibes un transcript en español de una nota de voz/caminata.
 Devuelve ÚNICAMENTE un JSON válido (sin markdown) con esta forma exacta:
 {
@@ -150,7 +222,7 @@ Devuelve ÚNICAMENTE un JSON válido (sin markdown) con esta forma exacta:
     {
       "name": string,
       "type": "person" | "project",
-      "kind": "fisica" | "juridica" | "ficticia" | "abstracta" | "ruido" (solo si type=person),
+      "kind": "fisica" | "juridica" | "ficticia" | "abstracta" | "ruido" | "geografia" (solo si type=person),
       "category": string (solo si type=project),
       "status": "activo" | "pausado" | "cerrado" | "emergente" (solo si type=project),
       "tactical_focus": string (solo si type=project, opcional)
@@ -166,9 +238,12 @@ Reglas:
 - entities = menciones candidatas. NO asumas identidad canónica; devolvé el nombre tal cual aparece.
 - type debe ser exactamente "person" o "project".
 ${slopRule}
-- ruido = basura NER: calles/direcciones, topónimos oídos al pasar, fragmentos sin sentido como persona.
-- NO incluyas lugares como type=project. Calles y direcciones van como person+ruido o se omiten.
-- Preferí omitir ruido obvio; si dudás, marcá kind=ruido.
+- Personas (type=person) = SOLO Físicas | Jurídicas | Ficticias (nombres propios de gente, orgs/marcas, personajes).
+- Geografía (kind=geografia): calles, ciudades, barrios, países, topónimos. NO las metas como persona fisica.
+- NO marques como person conceptos, categorías, dominios, adjetivos de taxonomía ni actividades (Gráfico, Audiovisual, distribución, motor, sistema…). Eso es abstracta u omitir.
+- ruido = basura NER: fragmentos sin sentido, interjecciones. Calles/lugares van a geografia, no a ruido.
+- NO incluyas lugares como type=project.
+- Preferí omitir ruido obvio; si dudás, marcá kind=ruido o abstracta (nunca fisica por defecto).
 - Responde solo JSON.`
 }
 
@@ -384,6 +459,7 @@ function normalizeEntity(e: {
       'ficticio',
       'abstracta',
       'ruido',
+      'geografia',
     ].includes(rawType)
   ) {
     type = 'person'
@@ -409,7 +485,14 @@ function normalizeEntity(e: {
     let resolved: string
     if (kind === 'agrupacion' || kind === 'ficticio') resolved = 'ficticia'
     else if (
-      ['fisica', 'juridica', 'ficticia', 'abstracta', 'ruido'].includes(kind)
+      [
+        'fisica',
+        'juridica',
+        'ficticia',
+        'abstracta',
+        'ruido',
+        'geografia',
+      ].includes(kind)
     ) {
       resolved = kind
     } else {
@@ -504,7 +587,7 @@ Devuelve ÚNICAMENTE un JSON válido (sin markdown) con esta forma exacta:
     {
       "name": string,
       "type": "person" | "project",
-      "kind": "fisica" | "juridica" | "ficticia" | "abstracta" | "ruido" (solo si type=person),
+      "kind": "fisica" | "juridica" | "ficticia" | "abstracta" | "ruido" | "geografia" (solo si type=person),
       "category": string (solo si type=project),
       "status": "activo" | "pausado" | "cerrado" | "emergente" (solo si type=project)
     }
@@ -523,12 +606,14 @@ Reglas:
 - suggested_weight = tu estimación 1-12 (el operador ya asignó peso humano aparte).
 - entities = SOLO nombres mencionados EN EL CUERPO del texto (no en Autor:/Link:).
   - NUNCA incluyas al Autor del post ni su @username como entidad, aunque aparezcan en metadata.
+  - Personas = Físicas | Jurídicas | Ficticias. Solo nombres propios.
   - Personas reales identificables → type=person kind=fisica.
   - Empresas, marcas, estudios, orgs, cuentas institucionales → type=person kind=juridica (o type=project si es producto/iniciativa).
   - Personajes, roles narrativos inventados → type=person kind=ficticia.
-  - Roles genéricos ("alguien", "la gente") → person+abstracta u omitir.
-  - Lugares/calles/basura NER → omitir o person+ruido.
-  - Clasificá kind con cuidado: NO defaults a fisica si es org/marca/ficticio.
+  - Lugares, calles, ciudades, barrios, países → type=person kind=geografia.
+  - Roles genéricos ("alguien", "la gente") y conceptos/categorías/dominios → omitir o person+abstracta. NUNCA fisica.
+  - Basura NER sin sentido → omitir o person+ruido.
+  - Clasificá kind con cuidado: NO defaults a fisica si es org/marca/ficticio/concepto/lugar.
 - Responde solo JSON.`
 
 export async function extractFromBookmark(
@@ -698,8 +783,9 @@ Reglas:
 - video_meta = síntesis de de qué va el video (descripción + audio + OCR); null si solo hay descripción corta.
 - entities = SOLO menciones en descripción/transcript/OCR (no en Autor:/Link:).
   - NUNCA incluyas al Autor del reel ni su @username como entidad.
-  - kind: fisica (persona real), juridica (marca/org/estudio), ficticia (personaje), abstracta/ruido según corresponda.
-  - NO defaults a fisica si es org/marca/ficticio.
+  - kind: fisica (persona real), juridica (marca/org/estudio), ficticia (personaje), geografia (lugar), abstracta/ruido según corresponda.
+  - Personas = Físicas | Jurídicas | Ficticias. Conceptos/categorías/dominios → omitir o abstracta, nunca fisica. Lugares → geografia.
+  - NO defaults a fisica si es org/marca/ficticio/concepto/lugar.
 - Responde solo JSON.`
 
 export type InstagramReelExtractInput = {
@@ -829,11 +915,21 @@ function mockInstagramExtraction(
   }
 }
 
-/** Explica un fotograma de reel con Cohere Vision. */
+/** Extrae texto de un fotograma (Unlimited-OCR) o explica con Cohere Vision. */
 export async function explainVideoFrame(
   imageAbsPath: string,
   tSec: number,
 ): Promise<string> {
+  try {
+    const { ocrVideoFrameIfEnabled } = await import('./unlimitedOcr.js')
+    const ocrText = await ocrVideoFrameIfEnabled(imageAbsPath)
+    if (ocrText) {
+      return `(t=${tSec}s) ${ocrText.replace(/\s+/g, ' ').trim()}`
+    }
+  } catch (err) {
+    console.warn('[cohere/ig] Unlimited-OCR frame:', err)
+  }
+
   const apiKey = env('COHERE_API_KEY')
   const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
   if (delayMs > 0) await delay(delayMs)
@@ -912,9 +1008,33 @@ export async function analyzeReelFrames(
   return out
 }
 
+function looksHallucinated(text: string): boolean {
+  const t = text.toLowerCase()
+  const banned = [
+    'segunda guerra mundial',
+    'primera guerra mundial',
+    'hoy hablaremos de',
+    'fue una guerra global',
+    'duró desde 1939',
+    'en esta lección',
+    'en este ensayo',
+    'a lo largo de la historia',
+    'revolución industrial',
+    'la edad media',
+  ]
+  if (banned.some((p) => t.includes(p))) return true
+  const lines = t.split(/\n/).map((l) => l.trim()).filter(Boolean)
+  if (text.length > 500 && lines.length <= 2 && /[.!?]\s+[A-ZÁÉÍÓÚ]/.test(text)) {
+    return true
+  }
+  return false
+}
+
 const NOTEBOOK_VISION_PROMPT = `Analizás una foto de cuaderno manuscrito (español). Puede ser UNA hoja, una TAPA, o una foto DOBLE (apertura con dos páginas y línea/gutter divisora en el medio).
 
-Tu ÚNICA tarea es TRANSLITERAR lo que se ve. No interpretes, no resumas, no inventes contexto histórico ni temas que no estén escritos.
+Tu ÚNICA tarea es TRANSLITERAR lo que se ve en la imagen. No interpretes, no resumas, no des clase, no inventes contexto histórico ni temas que no estén escritos.
+
+La letra puede ser irregular y la foto mediocre: igual INTENTÁ leer. Si una palabra no se ve clara, escribí tu mejor aproximación y marcá [?]. Nunca rellenes con un artículo, lección o Wikipedia.
 
 Devolvé ÚNICAMENTE JSON válido (sin markdown) con esta forma:
 {
@@ -956,8 +1076,8 @@ Reglas:
 - page_bbox debe enmarcar el papel útil (no la mesa). Si es spread, page_bbox puede ser el cuaderno entero abierto.
 - orientation_hint: rotación para que el texto quede derecho (0 si ya está).
 - Preservá saltos de línea y ubicación; no “corrijas” ortografía salvo ilegibilidad ([?]).
-- Copiá letras, números, títulos y listas TAL CUAL. Prohibido rellenar con prosa genérica (“esta es una página de notas…”, resúmenes de guerras, temas inventados).
-- Si hay poco texto o casi vacío: transcribí solo lo visible (aunque sea una palabra al margen). is_blank=true solo si no hay tinta útil.
+- Copiá letras, números romanos, títulos y listas TAL CUAL. Prohibido rellenar con prosa genérica (“esta es una página de notas…”, resúmenes de guerras, “hoy hablaremos de…”).
+- Si hay poco texto o casi vacío: transcribí solo lo visible (aunque sea una palabra al margen). is_blank=true solo si no hay tinta útil (ni títulos, ni números, ni tachaduras).
 - Incluí tablas, formas, conectores, dibujos y líneas en graphic_elements (descripción mínima del dibujo, no un ensayo).
 - Tapa lisa sin texto interior → layout="cover"; igual proponé título si hay etiqueta/marca.
 - Responde solo JSON.`
@@ -1045,11 +1165,11 @@ export async function analyzeNotebookPage(
     `[cohere/notebook-vision] ${path.basename(imageAbsPath)} → ${encoded.width}x${encoded.height} jpeg ${(encoded.bytes / 1024).toFixed(0)} KB`,
   )
 
-  const messages = [
+  const messagesFor = (prompt: string) => [
     {
       role: 'user' as const,
       content: [
-        { type: 'text' as const, text: NOTEBOOK_VISION_PROMPT },
+        { type: 'text' as const, text: prompt },
         {
           type: 'image_url' as const,
           image_url: { url: encoded.dataUrl },
@@ -1058,7 +1178,7 @@ export async function analyzeNotebookPage(
     },
   ]
 
-  const call = async (withJsonFormat: boolean) => {
+  const call = async (prompt: string, withJsonFormat: boolean) => {
     const res = await fetch('https://api.cohere.com/v2/chat', {
       method: 'POST',
       headers: {
@@ -1068,8 +1188,8 @@ export async function analyzeNotebookPage(
       },
       body: JSON.stringify({
         model,
-        temperature: 0.1,
-        messages,
+        temperature: 0,
+        messages: messagesFor(prompt),
         ...(withJsonFormat ? { response_format: { type: 'json_object' } } : {}),
       }),
     })
@@ -1084,36 +1204,51 @@ export async function analyzeNotebookPage(
     return (await res.json()) as unknown
   }
 
-  let data: unknown
-  try {
-    data = await call(true)
-  } catch (err) {
+  const retryable = (err: unknown) => {
     const status = (err as Error & { status?: number }).status
-    if (
-      (status === 500 || status === 502 || status === 503) ||
+    return (
+      status === 500 ||
+      status === 502 ||
+      status === 503 ||
       (status === 429 && !/Trial key|1000 API calls/i.test(String(err)))
-    ) {
-      console.warn('[cohere/notebook-vision] reintento tras', status)
-      await delay(Math.max(delayMs, 2500))
-      data = await call(true)
-    } else {
-      throw err
+    )
+  }
+
+  async function callWithRetry(prompt: string, withJson: boolean): Promise<unknown> {
+    try {
+      return await call(prompt, withJson)
+    } catch (err) {
+      if (!retryable(err)) throw err
+      const status = (err as Error & { status?: number }).status
+      console.warn(
+        `[cohere/notebook-vision] ${status}, reintento sin json_object…`,
+      )
+      await delay(Math.max(delayMs, 3000))
+      try {
+        return await call(prompt, false)
+      } catch (err2) {
+        if (!retryable(err2)) throw err2
+        console.warn('[cohere/notebook-vision] segundo reintento…')
+        await delay(5000)
+        return await call(prompt, false)
+      }
     }
   }
 
-  let raw = chatTextFromCohere(data)
-  let parsed: Record<string, unknown>
-  try {
-    parsed = extractJsonObject(raw)
-  } catch (parseErr) {
-    console.warn(
-      '[cohere/notebook-vision] JSON inválido, reintento sin response_format:',
-      parseErr,
-    )
-    data = await call(false)
-    raw = chatTextFromCohere(data)
-    parsed = extractJsonObject(raw)
+  const parseFrom = async (prompt: string, preferJson: boolean) => {
+    let data = await callWithRetry(prompt, preferJson)
+    let raw = chatTextFromCohere(data)
+    try {
+      return extractJsonObject(raw)
+    } catch (parseErr) {
+      console.warn('[cohere/notebook-vision] JSON inválido, reintento:', parseErr)
+      data = await callWithRetry(prompt, !preferJson)
+      raw = chatTextFromCohere(data)
+      return extractJsonObject(raw)
+    }
   }
+
+  let parsed = await parseFrom(NOTEBOOK_VISION_PROMPT, false)
 
   const elements = Array.isArray(parsed.graphic_elements)
     ? (parsed.graphic_elements as import('../types.js').GraphicElement[])
@@ -1134,6 +1269,23 @@ export async function analyzeNotebookPage(
     ].join('\n')
   }
 
+  if (looksHallucinated(transcription)) {
+    console.warn(
+      '[cohere/notebook-vision] alucinación detectada, segundo pase estricto',
+    )
+    const strict =
+      NOTEBOOK_VISION_PROMPT +
+      '\n\nLa respuesta anterior INVENTÓ un tema que no está en la foto. Volvé a transcribir SOLO las palabras visibles. Si no se lee, usá [?] — jamás un resumen histórico ni una lección.'
+    parsed = await parseFrom(strict, false)
+    transcription = String(parsed.transcription_spatial || '')
+    if (looksHallucinated(transcription)) {
+      transcription = ''
+      parsed.is_blank = false
+      parsed.title = 'Hoja sin título'
+      meta.notes = `${meta.notes || ''} alucinación descartada`.trim()
+    }
+  }
+
   const title = String(parsed.title || '').trim() || 'Hoja sin título'
   console.log(
     `[cohere/notebook-vision] ok título="${title.slice(0, 60)}" tx=${transcription.length}c gráficos=${elements.length} blank=${Boolean(parsed.is_blank)}`,
@@ -1142,8 +1294,10 @@ export async function analyzeNotebookPage(
   return {
     title,
     transcription_spatial: transcription,
-    graphic_elements: elements,
-    is_blank: Boolean(parsed.is_blank),
+    graphic_elements: Array.isArray(parsed.graphic_elements)
+      ? (parsed.graphic_elements as import('../types.js').GraphicElement[])
+      : elements,
+    is_blank: Boolean(parsed.is_blank) && transcription.trim().length < 8,
     meta,
   }
 }
@@ -1154,6 +1308,7 @@ export async function explainNotebookPage(input: {
   graphic_elements: import('../types.js').GraphicElement[]
   posicion: string
   numero_logico: number
+  extraContext?: string
 }): Promise<string> {
   const apiKey = env('COHERE_API_KEY')
   const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
@@ -1185,7 +1340,7 @@ export async function explainNotebookPage(input: {
           {
             role: 'system',
             content:
-              'Sos el analista de cuadernos de Deprocast. Explicá en español (2-4 párrafos) el sentido de UNA hoja usando SOLO la transcripción y los elementos gráficos que te pasan. Prohibido inventar hechos, guerras, libros o temas que no estén en ese texto. Si la transcripción es una lista de títulos o está casi vacía, describí eso (estructura y palabras reales) sin rellenar. Sin markdown ni JSON.',
+              'Sos el analista de cuadernos de Deprocast. Explicá en español (2-4 párrafos) el sentido de UNA hoja usando la transcripción, los elementos gráficos y el contexto extra del operador (audio STT, notas, planilla) si viene. Prohibido inventar hechos que no estén en esos materiales. Si la transcripción es una lista de títulos o está casi vacía, describí eso (estructura y palabras reales) sin rellenar. Sin markdown ni JSON.',
           },
           {
             role: 'user',
@@ -1196,7 +1351,10 @@ Transcripción espacial:
 ${input.transcription}
 
 Elementos gráficos:
-${graphicsSummary}`,
+${graphicsSummary}
+
+Contexto extra del operador (puede estar vacío):
+${(input.extraContext || '').trim() || '(ninguno)'}`,
           },
         ],
       }),
@@ -1261,7 +1419,14 @@ export async function extractNotebookEntities(input: {
             role: 'system',
             content: `Extraé entidades de una hoja de cuaderno. JSON único:
 {"entities":[{"name":string,"type":"person"|"project","kind"?:string,"category"?:string,"status"?:string}]}
-Reglas iguales a Deprocast NER. Solo JSON.`,
+Reglas Deprocast NER:
+- type=person SOLO si es una Persona real: nombre propio de humana (kind=fisica), org/marca/estudio (juridica), o personaje (ficticia).
+- Personas = Físicas | Jurídicas | Ficticias. NADA más.
+- kind=geografia: calles, ciudades, barrios, países, topónimos.
+- NO extraigas como person: categorías, dominios, adjetivos de taxonomía, conceptos, actividades, roles genéricos (ej. Gráfico, Audiovisual, Físico, Económico, Jurídico, Dimensiones, Vectores, Membrana, Atractor, distribución, producción, motor, sistema, idea).
+- Si dudás entre concepto y persona → OMITÍ o kind=abstracta (nunca fisica).
+- type=project = iniciativas/productos/obras con nombre propio, no etiquetas de lista.
+- Preferí pocas entidades correctas a muchas dudosas. Solo JSON.`,
           },
           {
             role: 'user',
@@ -1670,4 +1835,178 @@ export async function extractFromChatBlock(input: {
     throw new Error('Cohere devolvió JSON inválido para el bloque de chat')
   }
   return normalizeChatExtraction(parsed, transcript, chatName)
+}
+
+function mockIdaCards(title: string, body: string): DeproIdaCardProposal[] {
+  const gist = body.trim().slice(0, 280) || title
+  return [
+    { question: `¿Qué es «${title}»?`, answer: gist },
+    {
+      question: `¿En qué etapa o dominio entra «${title}»?`,
+      answer: gist,
+    },
+    {
+      question: `¿Qué harías con «${title}» si tuvieras que aplicarlo hoy?`,
+      answer: gist,
+    },
+  ]
+}
+
+function parseIdaCardsJson(raw: string): DeproIdaCardProposal[] | null {
+  const cleaned = raw
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim()
+  const tryParse = (s: string): unknown => {
+    try {
+      return JSON.parse(s)
+    } catch {
+      return null
+    }
+  }
+  let parsed = tryParse(cleaned)
+  if (!parsed) {
+    const start = cleaned.indexOf('{')
+    const end = cleaned.lastIndexOf('}')
+    if (start >= 0 && end > start) parsed = tryParse(cleaned.slice(start, end + 1))
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const cardsRaw = Array.isArray(parsed)
+    ? parsed
+    : (parsed as { cards?: unknown }).cards
+  if (!Array.isArray(cardsRaw)) return null
+  const cards: DeproIdaCardProposal[] = []
+  for (const row of cardsRaw) {
+    if (!row || typeof row !== 'object') continue
+    const question = String(
+      (row as { question?: unknown }).question ?? '',
+    ).trim()
+    const answer = String((row as { answer?: unknown }).answer ?? '').trim()
+    if (!question) continue
+    cards.push({ question, answer })
+    if (cards.length >= 3) break
+  }
+  return cards.length > 0 ? cards : null
+}
+
+export async function proposeIdaCards(
+  title: string,
+  body: string,
+): Promise<DeproIdaCardProposal[]> {
+  const fallback = mockIdaCards(title, body)
+  const apiKey = env('COHERE_API_KEY')
+  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
+  if (delayMs > 0) await delay(delayMs)
+  if (!apiKey) return fallback
+
+  try {
+    const model =
+      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
+    const res = await fetch('https://api.cohere.com/v2/chat', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        temperature: 0.3,
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Sos un tutor. Dado un concepto destilado, proponé exactamente 3 flashcards de recall activo: pregunta corta, respuesta precisa. Español. JSON: {"cards":[{"question":"...","answer":"..."}]}. Las preguntas deben obligar a recordar, no a reconocer. Sin cloze, sin markdown.',
+          },
+          {
+            role: 'user',
+            content: `Título: ${title}\n\nCuerpo:\n${body || '(vacío)'}`,
+          },
+        ],
+        response_format: { type: 'json_object' },
+      }),
+    })
+    if (!res.ok) {
+      const errText = await res.text()
+      console.error('[cohere/ida-cards] API error:', res.status, errText)
+      return fallback
+    }
+    const data = (await res.json()) as {
+      message?: { content?: Array<{ type?: string; text?: string }> }
+      text?: string
+    }
+    const raw =
+      data.message?.content?.map((c) => c.text ?? '').join('') ||
+      data.text ||
+      ''
+    const parsed = parseIdaCardsJson(raw)
+    if (!parsed) return fallback
+    while (parsed.length < 3) {
+      const extra = fallback[parsed.length]
+      if (extra) parsed.push(extra)
+      else break
+    }
+    return parsed.slice(0, 3)
+  } catch (err) {
+    console.error('[cohere/ida-cards]', err)
+    return fallback
+  }
+}
+
+export type CorpusChatMessage = {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+/**
+ * Chat multi-turno con contexto RAG ya armado en `system`.
+ * Texto libre (sin json_object).
+ */
+export async function chatWithCorpus(opts: {
+  system: string
+  messages: CorpusChatMessage[]
+}): Promise<string> {
+  const apiKey = env('COHERE_API_KEY')
+  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
+  if (delayMs > 0) await delay(delayMs)
+  if (!apiKey) {
+    throw new Error('Falta COHERE_API_KEY en .env')
+  }
+
+  const model =
+    env('COHERE_MODEL') || env('COHERE_MODEL_FAST') || 'command-r-08-2024'
+
+  const res = await fetch('https://api.cohere.com/v2/chat', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.3,
+      messages: [
+        { role: 'system', content: opts.system },
+        ...opts.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+      ],
+    }),
+  })
+
+  if (!res.ok) {
+    const errText = await res.text()
+    console.error('[cohere/dialogo] API error:', res.status, errText)
+    throw new Error(`Cohere chat falló (${res.status}): ${errText.slice(0, 240)}`)
+  }
+
+  const data = (await res.json()) as unknown
+  const text = chatTextFromCohere(data).trim()
+  if (!text) {
+    throw new Error('Cohere devolvió respuesta vacía')
+  }
+  return text
 }

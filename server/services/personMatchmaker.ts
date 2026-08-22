@@ -65,12 +65,16 @@ export function listWaitingEntities(db: DatabaseSync): Person[] {
   return rows<Person>(
     db
       .prepare(
-        `SELECT * FROM persons
-         WHERE source = 'extractor'
-           AND (status IS NULL OR status IN ('active', 'waiting'))
-           AND (merged_into IS NULL OR merged_into = '')
-           AND kind IN ('fisica','juridica','ficticia','agrupacion')
-         ORDER BY name COLLATE NOCASE ASC`,
+        `SELECT * FROM persons p
+         WHERE p.source = 'extractor'
+           AND (p.status IS NULL OR p.status IN ('active', 'waiting'))
+           AND (p.merged_into IS NULL OR p.merged_into = '')
+           AND p.kind IN ('fisica','juridica','ficticia','agrupacion')
+           AND NOT EXISTS (
+             SELECT 1 FROM agrupacion_members m
+             WHERE m.person_id = p.id
+           )
+         ORDER BY p.name COLLATE NOCASE ASC`,
       )
       .all(),
   ).map((p) => ({ ...p, kind: normalizePersonKind(p.kind) as Person['kind'] }))

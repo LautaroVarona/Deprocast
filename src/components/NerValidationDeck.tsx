@@ -289,11 +289,12 @@ export function NerValidationDeck({
                   Sala de espera
                 </div>
 
-                <label className="field">
-                  <span className="mono">Mención</span>
+                <label className="field ner-deck-mention-field">
                   <input
+                    className="ner-deck-mention-input"
                     value={name}
                     onChange={(e) => onNameChange(current.id, e.target.value)}
+                    aria-label="Mención"
                   />
                 </label>
 

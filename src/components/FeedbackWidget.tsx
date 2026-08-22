@@ -13,6 +13,10 @@ const VIEW_LABELS: Record<string, string> = {
   biblioteca: 'Biblioteca',
   chats: 'Chats',
   respaldo: 'Respaldo',
+  calendario: 'Calendario',
+  amazona: 'AmazonA',
+  mapa: 'Mapa',
+  deprocast: 'Núcleo Deprocast',
 }
 
 interface Props {

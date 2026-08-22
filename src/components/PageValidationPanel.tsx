@@ -89,7 +89,10 @@ function parseTags(raw: string | null | undefined): BlobTag[] {
       (t): t is BlobTag =>
         !!t &&
         typeof t === 'object' &&
-        (t.kind === 'person' || t.kind === 'project' || t.kind === 'agrupacion') &&
+        (t.kind === 'person' ||
+          t.kind === 'project' ||
+          t.kind === 'agrupacion' ||
+          t.kind === 'dominio') &&
         typeof t.entity_id === 'string' &&
         typeof t.entity_name === 'string',
     )
@@ -118,12 +121,14 @@ export function PageValidationPanel({
   onBack,
   onChanged,
   onSlotChange,
+  onValidateExplanation,
 }: {
   notebook: Notebook
   slot: number
   onBack: () => void
   onChanged: () => void
   onSlotChange?: (slot: number) => void
+  onValidateExplanation?: () => void
 }) {
   const [page, setPage] = useState<NotebookPage | null>(null)
   const [label, setLabel] = useState('')
@@ -158,6 +163,7 @@ export function PageValidationPanel({
   } | null>(null)
 
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const dirtyRef = useRef(false)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const searchAbort = useRef<AbortController | null>(null)
 
@@ -171,43 +177,53 @@ export function PageValidationPanel({
     [tags],
   )
 
-  const load = async (targetSlot = slot) => {
+  const load = async (
+    targetSlot = slot,
+    opts?: { force?: boolean; keepEditor?: boolean },
+  ) => {
     const res = await api.getNotebookPage(notebook.id, targetSlot)
     setPage(res.page)
     setLabel(res.label)
-    setTitle(res.page.title || '')
-    setTranscription(res.page.transcription_spatial || '')
-    const split = splitExplanation(
-      res.page.explanation,
-      res.page.explanation_user,
-    )
-    setExplanation(split.user)
-    setExplanationAi(split.ai)
-    try {
-      const parsed = JSON.parse(res.page.graphic_elements || '[]')
-      setGraphicsText(JSON.stringify(parsed, null, 2))
-    } catch {
-      setGraphicsText(res.page.graphic_elements || '[]')
+    const force = opts?.force === true || !dirtyRef.current
+    if (force) {
+      setTitle(res.page.title || '')
+      setTranscription(res.page.transcription_spatial || '')
+      const split = splitExplanation(
+        res.page.explanation,
+        res.page.explanation_user,
+      )
+      setExplanation(split.user)
+      setExplanationAi(split.ai)
+      try {
+        const parsed = JSON.parse(res.page.graphic_elements || '[]')
+        setGraphicsText(JSON.stringify(parsed, null, 2))
+      } catch {
+        setGraphicsText(res.page.graphic_elements || '[]')
+      }
+      const loadedTags = parseTags(res.page.mentioned_entities)
+      setTags(loadedTags)
+      setEntityNote(
+        loadedTags.length
+          ? loadedTags.map((t) => `@${t.entity_name}`).join(' ') + ' '
+          : '',
+      )
+      setNumero(res.page.numero_logico)
+      setPosicion(res.page.posicion_visual)
+      dirtyRef.current = false
     }
-    const loadedTags = parseTags(res.page.mentioned_entities)
-    setTags(loadedTags)
-    setEntityNote(
-      loadedTags.length
-        ? loadedTags.map((t) => `@${t.entity_name}`).join(' ') + ' '
-        : '',
-    )
-    setNumero(res.page.numero_logico)
-    setPosicion(res.page.posicion_visual)
-    setEditingImage(false)
+    if (!opts?.keepEditor) {
+      setEditingImage(false)
+      setImgTick((t) => t + 1)
+    }
     setMentionOpen(false)
-    setImgTick((t) => t + 1)
   }
 
   useEffect(() => {
     setError(null)
     setMsg(null)
     setPane('transcripcion')
-    void load(slot).catch((e) =>
+    dirtyRef.current = false
+    void load(slot, { force: true }).catch((e) =>
       setError(e instanceof Error ? e.message : 'Error'),
     )
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -216,7 +232,7 @@ export function PageValidationPanel({
   useEffect(() => {
     if (!page || page.status !== 'PendienteVision') return
     const id = window.setInterval(() => {
-      void load(slot).catch(() => undefined)
+      void load(slot, { keepEditor: true }).catch(() => undefined)
     }, 2000)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -251,6 +267,7 @@ export function PageValidationPanel({
       numero_logico: numero,
       posicion_visual: posicion,
       explanation,
+      explanation_ai: explanationAi,
       mentioned_entities: tags,
     }
   }
@@ -273,6 +290,7 @@ export function PageValidationPanel({
       setExplanation(split.user)
       setExplanationAi(split.ai)
       setMsg('Guardado')
+      dirtyRef.current = false
       onChanged()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al guardar')
@@ -287,8 +305,9 @@ export function PageValidationPanel({
     try {
       await api.reprocessNotebookPageVision(notebook.id, slot)
       setMsg('Visión en cola')
+      dirtyRef.current = false
       onChanged()
-      await load(slot)
+      await load(slot, { force: true })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error visión')
     } finally {
@@ -312,6 +331,31 @@ export function PageValidationPanel({
       onChanged()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al aprobar')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sendToCorpus = async () => {
+    const savedSlot = slot
+    setError(null)
+    setMsg(null)
+    setBusy(true)
+    try {
+      await api.patchNotebookPage(notebook.id, savedSlot, patchBody())
+      if (page?.status !== 'Validada' && page?.status !== 'Procesada') {
+        await api.approveNotebookTranscription(notebook.id, savedSlot)
+      }
+      const res = await api.confirmNotebookPage(notebook.id, savedSlot)
+      setMsg(
+        res.already
+          ? 'Esta hoja ya estaba en cola al corpus'
+          : 'Hoja en cola al corpus',
+      )
+      dirtyRef.current = false
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al enviar al corpus')
     } finally {
       setBusy(false)
     }
@@ -366,7 +410,7 @@ export function PageValidationPanel({
       void (async () => {
         try {
           const res = await api.typeaheadEntities(query, {
-            kinds: ['person', 'agrupacion', 'project'],
+            kinds: ['person', 'agrupacion', 'project', 'dominio'],
             limit: 12,
             scope: 'all',
             signal: ac.signal,
@@ -377,7 +421,8 @@ export function PageValidationPanel({
               (h): h is typeof h & { kind: BlobTag['kind'] } =>
                 h.kind === 'person' ||
                 h.kind === 'project' ||
-                h.kind === 'agrupacion',
+                h.kind === 'agrupacion' ||
+                h.kind === 'dominio',
             )
             .map((h) => ({
               kind: h.kind,
@@ -505,6 +550,7 @@ export function PageValidationPanel({
           : entityNote
 
   const setPaneValue = (value: string) => {
+    dirtyRef.current = true
     if (pane === 'transcripcion') setTranscription(value)
     else if (pane === 'explicacion') setExplanation(value)
     else if (pane === 'json') setGraphicsText(value)
@@ -601,6 +647,28 @@ export function PageValidationPanel({
               ? 'Transcripción aprobada'
               : 'Aprobar transcripción'}
           </button>
+          {page.status === 'Validada' && explanationAi && onValidateExplanation && (
+            <button
+              type="button"
+              className="btn btn-tiny btn-primary"
+              disabled={busy}
+              title="Imagen + explicación, peso 1–12 e integrar al corpus"
+              onClick={onValidateExplanation}
+            >
+              Validar explicación
+            </button>
+          )}
+          {page.status === 'Validada' && (
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={busy}
+              title="Envío directo sin valorar (peso 7)"
+              onClick={() => void sendToCorpus()}
+            >
+              Enviar esta hoja al corpus
+            </button>
+          )}
         </div>
       </div>
 
@@ -659,7 +727,10 @@ export function PageValidationPanel({
               <input
                 className="nb-input"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => {
+                  dirtyRef.current = true
+                  setTitle(e.target.value)
+                }}
               />
             </label>
             <label>
@@ -758,8 +829,11 @@ export function PageValidationPanel({
               <textarea
                 className="nb-textarea is-ai-explain"
                 value={explanationAi}
-                readOnly
-                spellCheck={false}
+                onChange={(e) => {
+                  dirtyRef.current = true
+                  setExplanationAi(e.target.value)
+                }}
+                spellCheck
               />
             </div>
           ) : null}

@@ -12,6 +12,8 @@ const KIND_SET = new Set<TypeaheadKind>([
   'project',
   'quantomo',
   'agrupacion',
+  'dominio',
+  'geografia',
 ])
 
 entitiesRouter.get('/typeahead', (req, res) => {

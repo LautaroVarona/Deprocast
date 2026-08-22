@@ -415,3 +415,49 @@ export function enqueueEmbed(fn: () => Promise<void>): void {
     console.error('[mnemosyne] background embed error:', err)
   })
 }
+
+export function similarToStored(
+  objectType: EmbeddingObjectType,
+  objectId: string,
+  opts?: { types?: EmbeddingObjectType[]; limit?: number },
+): Array<{
+  object_type: EmbeddingObjectType
+  object_id: string
+  score: number
+}> {
+  const limit = opts?.limit ?? 8
+  const db = getDb()
+  const model = env('COHERE_EMBED_MODEL', 'embed-v4.0')
+  const found = row<{ vector: string; model: string }>(
+    db
+      .prepare(
+        `SELECT vector, model FROM embeddings
+         WHERE object_type = ? AND object_id = ? AND model = ?`,
+      )
+      .get(objectType, objectId, model),
+  )
+  if (!found) return []
+  const queryVec = parseVector(found.vector)
+  if (!queryVec) return []
+  const partition = loadVectorPartition(found.model, opts?.types)
+  return partition
+    .filter((r) => r.object_type !== objectType || r.object_id !== objectId)
+    .map((r) => ({
+      object_type: r.object_type,
+      object_id: r.object_id,
+      score: cosineSimilarity(queryVec, r.vector),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+}
+
+export async function embedIdaItem(id: string): Promise<void> {
+  const found = row<{ title: string; body: string; kind: string }>(
+    getDb()
+      .prepare('SELECT title, body, kind FROM depro_ida_items WHERE id = ?')
+      .get(id),
+  )
+  if (!found || found.kind !== 'aprendizaje') return
+  const text = [found.title, found.body].filter(Boolean).join('\n\n')
+  await upsertEmbedding('ida_item', id, text)
+}

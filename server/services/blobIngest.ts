@@ -6,7 +6,7 @@ import { embedApprovedEntry, enqueueEmbed } from './embeddings.js'
 import { extractFromTranscript } from './cohere.js'
 import type { CohereQuantomo } from '../types.js'
 
-export type BlobTagKind = 'person' | 'project' | 'agrupacion'
+export type BlobTagKind = 'person' | 'project' | 'agrupacion' | 'dominio'
 
 export type BlobTag = {
   kind: BlobTagKind
@@ -44,9 +44,11 @@ function parseTags(raw: unknown): BlobTag[] {
         ? 'project'
         : o.kind === 'agrupacion'
           ? 'agrupacion'
-          : o.kind === 'person'
-            ? 'person'
-            : null
+          : o.kind === 'dominio'
+            ? 'dominio'
+            : o.kind === 'person'
+              ? 'person'
+              : null
     const entity_id = String(o.entity_id ?? '').trim()
     const entity_name = String(o.entity_name ?? '').trim()
     if (!kind || !entity_id) continue
@@ -85,6 +87,12 @@ function resolveTagName(
         .get(entityId),
     )
     return p?.title ?? null
+  }
+  if (kind === 'dominio') {
+    const d = row<{ name: string }>(
+      db.prepare(`SELECT name FROM dominios WHERE id = ?`).get(entityId),
+    )
+    return d?.name ?? (fallback || null)
   }
   const a = row<{ name: string }>(
     db.prepare(`SELECT name FROM agrupaciones WHERE id = ?`).get(entityId),
@@ -171,6 +179,7 @@ export function listEntryTags(entryId: string): BlobTag[] {
              WHEN l.entity_kind = 'person' THEN p.name
              WHEN l.entity_kind = 'project' THEN proj.title
              WHEN l.entity_kind = 'agrupacion' THEN a.name
+             WHEN l.entity_kind = 'dominio' THEN d.name
              ELSE l.entity_id
            END AS entity_name
          FROM entity_links l
@@ -180,6 +189,8 @@ export function listEntryTags(entryId: string): BlobTag[] {
            ON l.entity_kind = 'project' AND proj.id = l.entity_id
          LEFT JOIN agrupaciones a
            ON l.entity_kind = 'agrupacion' AND a.id = l.entity_id
+         LEFT JOIN dominios d
+           ON l.entity_kind = 'dominio' AND d.id = l.entity_id
          WHERE l.entry_id = ? AND l.role = 'mentioned'
          ORDER BY l.created_at ASC`,
       )

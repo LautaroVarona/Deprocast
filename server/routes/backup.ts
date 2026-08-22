@@ -8,6 +8,7 @@ import {
   serializeBackupJson,
   serializeBackupXml,
 } from '../services/backup.js'
+import { copyBackupFilename, getCurrentRun, toBackupRunMeta } from '../services/run.js'
 
 export const backupRouter = Router()
 
@@ -16,13 +17,10 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024, files: 1 },
 })
 
-function stamp(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
 backupRouter.get('/summary', (_req, res) => {
   try {
-    res.json({ ok: true, ...backupSummary() })
+    const run = toBackupRunMeta(getCurrentRun())
+    res.json({ ok: true, ...backupSummary(run) })
   } catch (err) {
     console.error('[backup/summary]', err)
     res.status(500).json({
@@ -38,14 +36,18 @@ backupRouter.get('/', (req, res) => {
     return
   }
   try {
-    const dump = dumpBackup()
-    const day = stamp()
+    const current = getCurrentRun()
+    const dump = dumpBackup({
+      purpose: 'copy',
+      run: toBackupRunMeta(current),
+    })
+    const base = copyBackupFilename(current).replace(/\.json$/, '')
     if (format === 'csv') {
       const body = serializeBackupCsv(dump)
       res.setHeader('Content-Type', 'text/csv; charset=utf-8')
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="deprocast-respaldo-${day}.csv"`,
+        `attachment; filename="${base}.csv"`,
       )
       res.send(body)
       return
@@ -55,7 +57,7 @@ backupRouter.get('/', (req, res) => {
       res.setHeader('Content-Type', 'application/xml; charset=utf-8')
       res.setHeader(
         'Content-Disposition',
-        `attachment; filename="deprocast-respaldo-${day}.xml"`,
+        `attachment; filename="${base}.xml"`,
       )
       res.send(body)
       return
@@ -64,7 +66,7 @@ backupRouter.get('/', (req, res) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8')
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="deprocast-respaldo-${day}.json"`,
+      `attachment; filename="${base}.json"`,
     )
     res.send(body)
   } catch (err) {

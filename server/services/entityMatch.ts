@@ -388,7 +388,7 @@ export function createEntityProposalsFromEntry(
       )
       meta = { ...meta, kind: personKind }
 
-      // Ruido/abstracta: no intentamos match; el validador las descarta fácil
+      // Ruido/abstracta: no match; geografía: sala general sin match a perfiles
       if (personKind === 'ruido' || personKind === 'abstracta') {
         meta = {
           ...meta,
@@ -410,6 +410,11 @@ export function createEntityProposalsFromEntry(
             suggested_match_name: rumboName,
             match_mode: 'ruido',
           }
+        }
+      } else if (personKind === 'geografia') {
+        meta = {
+          ...meta,
+          match_mode: 'none',
         }
       } else {
         const match = findBestPersonMatch(name, persons)

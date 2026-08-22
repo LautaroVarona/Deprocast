@@ -17,6 +17,11 @@ import {
 } from './services/nerGuards.js'
 import { normalizePersonKind } from './services/personKinds.js'
 import { mapVisualSlot, TOTAL_FACES } from './services/notebookLayout.js'
+import { seedAmazona } from './services/amazonaSeed.js'
+import { seedMap } from './services/mapSeed.js'
+import { seedDeprocast } from './services/deprocastSeed.js'
+import { seedDominios } from './services/dominios.js'
+import { migratePersonGeografiaToTable } from './services/geografia.js'
 
 const DATA_DIR = path.resolve(process.cwd(), 'data')
 const DB_PATH = path.join(DATA_DIR, 'deprocast.db')
@@ -214,6 +219,7 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'entries', 'diarization_json', 'TEXT')
   ensureColumn(database, 'entries', 'speaker_map', `TEXT NOT NULL DEFAULT '[]'`)
   ensureColumn(database, 'entries', 'duration_sec', 'REAL')
+  ensureColumn(database, 'entries', 'place_id', 'TEXT')
   ensureColumn(database, 'persons', 'merged_into', 'TEXT')
   ensureColumn(database, 'persons', 'is_operator', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(database, 'projects', 'merged_into', 'TEXT')
@@ -270,7 +276,24 @@ function migrate(database: DatabaseSync): void {
     `TEXT NOT NULL DEFAULT '[]'`,
   )
   ensureColumn(database, 'pages', 'explanation_user', 'TEXT')
+  ensureColumn(database, 'pages', 'explanation_weight', 'INTEGER')
   remapaNotebookPageLayout(database)
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS notebook_sources (
+      id TEXT PRIMARY KEY,
+      notebook_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      vault_path TEXT,
+      original_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_notebook_sources_nb
+      ON notebook_sources(notebook_id, created_at);
+  `)
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS person_relations (
@@ -441,6 +464,34 @@ function migrate(database: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_chat_blocks_session
       ON chat_blocks(chat_session_id, started_at);
 
+    CREATE TABLE IF NOT EXISTS dialogo_threads (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      section_key TEXT,
+      entity_refs TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS dialogo_messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dialogo_messages_thread
+      ON dialogo_messages(thread_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS dashboard_pins (
+      slot INTEGER PRIMARY KEY CHECK (slot >= 0 AND slot <= 11),
+      ref_type TEXT NOT NULL,
+      ref_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS link_harvest (
       id TEXT PRIMARY KEY,
       url_cruda TEXT NOT NULL,
@@ -474,7 +525,335 @@ function migrate(database: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_feedback_notes_created
       ON feedback_notes(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS ama_lists (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      size INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      tags TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ama_list_items (
+      id TEXT PRIMARY KEY,
+      list_id TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      label TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      place_id TEXT,
+      parent_item_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ama_items_list
+      ON ama_list_items(list_id, parent_item_id, position);
+
+    CREATE TABLE IF NOT EXISTS ama_lista6_parts (
+      lista6_id TEXT PRIMARY KEY,
+      tridente_a_id TEXT NOT NULL,
+      tridente_b_id TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ama_places (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      lat REAL,
+      lng REAL,
+      kind TEXT NOT NULL DEFAULT 'lugar',
+      tags TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ama_matrices (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      order_n INTEGER NOT NULL,
+      row_list_id TEXT NOT NULL,
+      col_list_id TEXT NOT NULL,
+      tags TEXT NOT NULL DEFAULT '[]',
+      neo_swapped INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ama_cells (
+      id TEXT PRIMARY KEY,
+      matrix_id TEXT NOT NULL,
+      row_item_id TEXT NOT NULL,
+      col_item_id TEXT NOT NULL,
+      title TEXT,
+      notes TEXT NOT NULL DEFAULT '',
+      cycle_slot TEXT,
+      place_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(matrix_id, row_item_id, col_item_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ama_cells_matrix ON ama_cells(matrix_id);
+
+    CREATE TABLE IF NOT EXISTS ama_neo_cells (
+      id TEXT PRIMARY KEY,
+      matrix_id TEXT NOT NULL,
+      title_index INTEGER NOT NULL,
+      cycle_slot TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      UNIQUE(matrix_id, title_index, cycle_slot)
+    );
+
+    CREATE TABLE IF NOT EXISTS ama_flows (
+      id TEXT PRIMARY KEY,
+      from_place_id TEXT NOT NULL,
+      to_place_id TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      distance_m REAL,
+      cycle_slot TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ama_flows_recorded
+      ON ama_flows(recorded_at DESC);
+
+    CREATE TABLE IF NOT EXISTS ama_links (
+      id TEXT PRIMARY KEY,
+      object_type TEXT NOT NULL,
+      object_id TEXT NOT NULL,
+      target_kind TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'tag',
+      created_at TEXT NOT NULL,
+      UNIQUE(object_type, object_id, target_kind, target_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ama_links_object
+      ON ama_links(object_type, object_id);
+
+    CREATE TABLE IF NOT EXISTS ama_cycle_state (
+      id TEXT PRIMARY KEY,
+      offset INTEGER NOT NULL DEFAULT 0,
+      hoy_started_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS map_systems (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      center_lat REAL NOT NULL,
+      center_lng REAL NOT NULL,
+      zoom REAL NOT NULL DEFAULT 13,
+      pitch REAL NOT NULL DEFAULT 45,
+      bearing REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS map_layers (
+      id TEXT PRIMARY KEY,
+      system_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      visible INTEGER NOT NULL DEFAULT 1,
+      opacity REAL NOT NULL DEFAULT 1,
+      z_index INTEGER NOT NULL DEFAULT 0,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_map_layers_system
+      ON map_layers(system_id, z_index);
+
+    CREATE TABLE IF NOT EXISTS map_tags (
+      id TEXT PRIMARY KEY,
+      system_id TEXT NOT NULL,
+      layer_id TEXT,
+      lat REAL NOT NULL,
+      lng REAL NOT NULL,
+      h3_index TEXT,
+      place_id TEXT,
+      label TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      target_kind TEXT,
+      target_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS depro_power_notes (
+      power_index INTEGER PRIMARY KEY,
+      notes TEXT NOT NULL DEFAULT '',
+      status TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS dominios (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      notes TEXT,
+      is_fixed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS geografia (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'lugar',
+      aliases TEXT NOT NULL DEFAULT '[]',
+      notes TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      source TEXT NOT NULL DEFAULT 'manual',
+      merged_into TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_geografia_source
+      ON geografia(source, name COLLATE NOCASE);
+
+    CREATE TABLE IF NOT EXISTS depro_ida_items (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      stage TEXT NOT NULL,
+      power_indexes TEXT NOT NULL DEFAULT '[]',
+      agent_ids TEXT NOT NULL DEFAULT '[]',
+      tags TEXT NOT NULL DEFAULT '[]',
+      origin TEXT NOT NULL DEFAULT 'ui',
+      archived INTEGER NOT NULL DEFAULT 0,
+      matrix_id TEXT,
+      row_item_id TEXT,
+      col_item_id TEXT,
+      weight INTEGER,
+      kind TEXT NOT NULL DEFAULT 'organismo',
+      domain_ids TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_depro_ida_stage
+      ON depro_ida_items(archived, stage, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS depro_ida_cards (
+      id TEXT PRIMARY KEY,
+      ida_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      answer TEXT NOT NULL DEFAULT '',
+      due_at TEXT,
+      ease REAL NOT NULL DEFAULT 2.5,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_depro_ida_cards_due
+      ON depro_ida_cards(due_at);
+
+    CREATE INDEX IF NOT EXISTS idx_depro_ida_cards_ida
+      ON depro_ida_cards(ida_id, due_at);
+
+    CREATE TABLE IF NOT EXISTS depro_research_packs (
+      id TEXT PRIMARY KEY,
+      topic TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      prompt_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      origin TEXT NOT NULL DEFAULT 'manual',
+      parent_finding_id TEXT,
+      parent_pack_id TEXT,
+      raw_content TEXT NOT NULL DEFAULT '',
+      raw_citations TEXT NOT NULL DEFAULT '[]',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_depro_research_packs_status
+      ON depro_research_packs(status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS depro_research_findings (
+      id TEXT PRIMARY KEY,
+      pack_id TEXT NOT NULL,
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      axis_index INTEGER,
+      node_index INTEGER,
+      axis_title TEXT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      url TEXT,
+      status TEXT NOT NULL,
+      assimilated_ida_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_depro_research_findings_pack
+      ON depro_research_findings(pack_id, sort_index);
+
+    CREATE INDEX IF NOT EXISTS idx_map_tags_system
+      ON map_tags(system_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_map_tags_place ON map_tags(place_id);
+    CREATE INDEX IF NOT EXISTS idx_entries_place ON entries(place_id);
+
+    CREATE TABLE IF NOT EXISTS app_runs (
+      id TEXT PRIMARY KEY,
+      operator_id TEXT NOT NULL,
+      operator_name TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      status TEXT NOT NULL,
+      backup_path TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_app_runs_status ON app_runs(status);
   `)
+  ensureColumn(database, 'depro_ida_items', 'matrix_id', 'TEXT')
+  ensureColumn(database, 'depro_ida_items', 'row_item_id', 'TEXT')
+  ensureColumn(database, 'depro_ida_items', 'col_item_id', 'TEXT')
+  ensureColumn(database, 'depro_ida_items', 'weight', 'INTEGER')
+  ensureColumn(
+    database,
+    'depro_ida_items',
+    'kind',
+    `TEXT NOT NULL DEFAULT 'organismo'`,
+  )
+  ensureColumn(
+    database,
+    'depro_ida_items',
+    'domain_ids',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(
+    database,
+    'depro_research_packs',
+    'origin',
+    `TEXT NOT NULL DEFAULT 'manual'`,
+  )
+  ensureColumn(database, 'depro_research_findings', 'axis_index', 'INTEGER')
+  ensureColumn(database, 'depro_research_findings', 'node_index', 'INTEGER')
+  ensureColumn(database, 'depro_research_findings', 'axis_title', 'TEXT')
+  // Índice después de ensureColumn: DBs viejas no tenían matrix_id en CREATE TABLE.
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_depro_ida_cell
+      ON depro_ida_items(matrix_id, row_item_id, col_item_id);
+  `)
+  ensureColumn(database, 'ama_places', 'parent_id', 'TEXT')
+  ensureColumn(database, 'ama_places', 'h3_index', 'TEXT')
+  ensureColumn(database, 'ama_places', 'zone_code', 'TEXT')
+  ensureColumn(database, 'ama_places', 'role', 'TEXT')
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_ama_places_parent ON ama_places(parent_id)`,
+  )
   ensureColumn(database, 'bookmarks', 'source', `TEXT NOT NULL DEFAULT 'twitter'`)
   ensureColumn(database, 'bookmarks', 'shortcode', 'TEXT')
   ensureColumn(database, 'bookmarks', 'media_pk', 'TEXT')
@@ -497,6 +876,7 @@ function migrate(database: DatabaseSync): void {
   migratePersonKinds(database)
   scrubBookmarkAuthorEntities(database)
   refinePendingPersonKinds(database)
+  migratePersonGeografiaToTable(database)
   migrateProjectKinds(database)
   ensureEntityAliasIndex(database)
   ensureProjectAliasIndex(database)
@@ -504,6 +884,7 @@ function migrate(database: DatabaseSync): void {
   backfillEntityAliases(database)
   backfillProjectAliases(database)
   ensureSearchFts(database)
+  backfillCurrentRun(database)
 }
 
 /** Quantomos existentes: el peso Cohere/Aduana pasa a suggested_weight. */
@@ -1059,7 +1440,7 @@ function refinePendingPersonKinds(database: DatabaseSync): void {
   const raws = database
     .prepare(
       `SELECT id, name, payload FROM entry_entities_raw
-       WHERE type IN ('person','persona','people','fisica','juridica','ficticia','ficticio','abstracta','ruido','agrupacion')`,
+       WHERE type IN ('person','persona','people','fisica','juridica','ficticia','ficticio','abstracta','ruido','geografia','agrupacion')`,
     )
     .all() as Array<{ id: string; name: string; payload: string }>
   const updRaw = database.prepare(
@@ -1504,6 +1885,36 @@ export function ensureTrincheraSeed(): void {
   seed(getDb())
 }
 
+/** Si hay operador y ninguna RUN current, crea la RUN con su created_at. */
+export function backfillCurrentRun(database: DatabaseSync = getDb()): void {
+  const current = database
+    .prepare(
+      `SELECT id FROM app_runs WHERE status = 'current' LIMIT 1`,
+    )
+    .get() as { id: string } | undefined
+  if (current) return
+
+  const op = database
+    .prepare(
+      `SELECT id, name, created_at FROM persons
+       WHERE is_operator = 1
+         AND (merged_into IS NULL OR merged_into = '')
+       LIMIT 1`,
+    )
+    .get() as { id: string; name: string; created_at: string } | undefined
+  if (!op) return
+
+  const now = new Date().toISOString()
+  database
+    .prepare(
+      `INSERT INTO app_runs (
+        id, operator_id, operator_name, started_at, ended_at,
+        status, backup_path, created_at
+      ) VALUES (?, ?, ?, ?, NULL, 'current', NULL, ?)`,
+    )
+    .run(randomUUID(), op.id, op.name, op.created_at || now, now)
+}
+
 function backfillSearchFts(database: DatabaseSync): void {
   const personFts = database
     .prepare(`SELECT COUNT(*) as c FROM persons_fts`)
@@ -1593,6 +2004,11 @@ function seed(database: DatabaseSync): void {
       )
       .run(now)
   }
+
+  seedAmazona(database)
+  seedMap(database)
+  seedDominios(database)
+  seedDeprocast(database)
 }
 
 export function getTrincheraNotebookId(): string {

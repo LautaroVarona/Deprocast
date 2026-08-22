@@ -25,18 +25,29 @@ import {
 } from '../services/notebookIngest.js'
 import {
   approveNotebookTranscription,
+  clampExplanationWeight,
   composeExplanation,
   enqueueNotebookConfirm,
   enqueueNotebookCorpus,
   enqueueNotebookExplanations,
   enqueueNotebookFullRead,
   enqueueNotebookVision,
+  enqueueValidateAllExplanations,
   getNotebookVisionQueueStatus,
   parseMentionedEntities,
   splitExplanation,
 } from '../services/notebookProcess.js'
+import { streamNotebookExportZip } from '../services/notebookExport.js'
 import { applyEntityMentionTags } from '../services/blobIngest.js'
 import { labelForSlot, mapVisualSlot, TOTAL_FACES } from '../services/notebookLayout.js'
+import {
+  addNotebookNoteSource,
+  addNotebookSourceFromFile,
+  deleteNotebookSource,
+  enqueueSourceProcessing,
+  getNotebookSource,
+  listNotebookSources,
+} from '../services/notebookSources.js'
 
 export const notebooksRouter = Router()
 
@@ -52,6 +63,20 @@ const upload = multer({
     },
   }),
   limits: { fileSize: 200 * 1024 * 1024 },
+})
+
+const sourceUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = path.join(os.tmpdir(), 'deprocast-notebooks')
+      fs.mkdirSync(dir, { recursive: true })
+      cb(null, dir)
+    },
+    filename: (_req, file, cb) => {
+      cb(null, `${Date.now()}-${file.originalname}`)
+    },
+  }),
+  limits: { fileSize: 512 * 1024 * 1024, files: 32 },
 })
 
 function requireProductNotebook(id: string): Notebook {
@@ -166,6 +191,38 @@ notebooksRouter.post('/:id/send-to-corpus', (req, res) => {
   }
 })
 
+notebooksRouter.post('/:id/validate-all-explanations', (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    const body = req.body as { weight?: number }
+    const result = enqueueValidateAllExplanations(
+      req.params.id,
+      body.weight ?? 7,
+    )
+    res.json({
+      ok: true,
+      ...result,
+      vision_queue: getNotebookVisionQueueStatus(req.params.id),
+    })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+notebooksRouter.get('/:id/export', (req, res) => {
+  try {
+    const notebook = requireProductNotebook(req.params.id)
+    streamNotebookExportZip(notebook, res)
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    console.error('[notebooks/export]', err)
+    if (!res.headersSent) {
+      res.status(e.status || 500).json({ error: e.message })
+    }
+  }
+})
+
 notebooksRouter.get('/:id', (req, res) => {
   try {
     const notebook = requireProductNotebook(req.params.id)
@@ -192,9 +249,100 @@ notebooksRouter.get('/:id', (req, res) => {
       notebook,
       pages,
       index,
+      sources: listNotebookSources(notebook.id),
       summary,
       vision_queue: getNotebookVisionQueueStatus(notebook.id),
     })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+notebooksRouter.get('/:id/sources', (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    res.json({ sources: listNotebookSources(req.params.id) })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+notebooksRouter.post(
+  '/:id/sources',
+  sourceUpload.array('files', 32),
+  (req, res) => {
+    try {
+      requireProductNotebook(req.params.id)
+      const files = (req.files as Express.Multer.File[] | undefined) ?? []
+      const noteText =
+        typeof req.body?.note === 'string' ? req.body.note.trim() : ''
+      if (files.length === 0 && !noteText) {
+        res.status(400).json({ error: 'Archivos o nota requeridos' })
+        return
+      }
+      const created = []
+      const errors: string[] = []
+      for (const file of files) {
+        try {
+          created.push(addNotebookSourceFromFile(req.params.id, file))
+        } catch (err) {
+          errors.push(
+            `${file.originalname}: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
+        try {
+          fs.unlinkSync(file.path)
+        } catch {
+          /* ignore */
+        }
+      }
+      if (noteText) {
+        created.push(addNotebookNoteSource(req.params.id, noteText))
+      }
+      if (created.length === 0) {
+        res.status(400).json({
+          error: errors.join(' · ') || 'No se pudo importar ninguna fuente',
+        })
+        return
+      }
+      enqueueSourceProcessing(created.map((s) => s.id))
+      res.status(201).json({
+        sources: created,
+        warning: errors.length ? errors.join(' · ') : undefined,
+      })
+    } catch (err) {
+      const e = err as Error & { status?: number }
+      console.error('[notebooks/sources]', err)
+      res.status(e.status || 500).json({ error: e.message })
+    }
+  },
+)
+
+notebooksRouter.post('/:id/sources/note', (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    const text = typeof req.body?.text === 'string' ? req.body.text : ''
+    const source = addNotebookNoteSource(req.params.id, text)
+    enqueueSourceProcessing([source.id])
+    res.status(201).json({ source })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+notebooksRouter.delete('/:id/sources/:sourceId', (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    const existing = getNotebookSource(req.params.id, req.params.sourceId)
+    if (!existing) {
+      res.status(404).json({ error: 'Fuente no encontrada' })
+      return
+    }
+    deleteNotebookSource(req.params.id, req.params.sourceId)
+    res.json({ ok: true, id: req.params.sourceId })
   } catch (err) {
     const e = err as Error & { status?: number }
     res.status(e.status || 500).json({ error: e.message })
@@ -370,6 +518,8 @@ notebooksRouter.patch('/:id/pages/:slot', (req, res) => {
       numero_logico?: number
       posicion_visual?: string
       explanation?: string
+      explanation_ai?: string
+      explanation_weight?: number | null
       mentioned_entities?: unknown
     }
 
@@ -421,13 +571,28 @@ notebooksRouter.patch('/:id/pages/:slot', (req, res) => {
       status = page.status
     }
 
-    let nextExplanation = page.explanation
-    let nextExplanationUser = page.explanation_user
+    const split = splitExplanation(page.explanation, page.explanation_user)
+    let nextUser = split.user
+    let nextAi = split.ai
+    let touchExplanation =
+      body.explanation !== undefined || body.explanation_ai !== undefined
     if (body.explanation !== undefined) {
-      const user = body.explanation.trim()
-      const ai = splitExplanation(page.explanation, page.explanation_user).ai
-      nextExplanationUser = user || null
-      nextExplanation = composeExplanation(user, ai) || null
+      nextUser = body.explanation.trim()
+    }
+    if (body.explanation_ai !== undefined) {
+      nextAi = body.explanation_ai.trim()
+    }
+    const nextExplanationUser = touchExplanation
+      ? nextUser || null
+      : page.explanation_user
+    const nextExplanation = touchExplanation
+      ? composeExplanation(nextUser, nextAi) || null
+      : page.explanation
+
+    let nextWeight: number | null =
+      page.explanation_weight != null ? Number(page.explanation_weight) : null
+    if (body.explanation_weight !== undefined) {
+      nextWeight = clampExplanationWeight(body.explanation_weight)
     }
 
     getDb()
@@ -441,6 +606,7 @@ notebooksRouter.patch('/:id/pages/:slot', (req, res) => {
           posicion_visual = COALESCE(?, posicion_visual),
           explanation = ?,
           explanation_user = ?,
+          explanation_weight = ?,
           mentioned_entities = COALESCE(?, mentioned_entities),
           status = ?,
           updated_at = ?
@@ -455,6 +621,7 @@ notebooksRouter.patch('/:id/pages/:slot', (req, res) => {
         body.posicion_visual ?? null,
         nextExplanation,
         nextExplanationUser,
+        nextWeight,
         body.mentioned_entities !== undefined
           ? JSON.stringify(parseMentionedEntities(body.mentioned_entities))
           : null,
@@ -663,6 +830,109 @@ notebooksRouter.post('/:id/pages/:slot/confirm', (req, res) => {
       msg.includes('Falta') ||
       msg.includes('no encontrada') ||
       msg.includes('Trinchera')
+    res.status(e.status || (client ? 400 : 500)).json({ error: msg })
+  }
+})
+
+/**
+ * Validar explicación: editar texto IA, pesar 1–12 e integrar al corpus.
+ */
+notebooksRouter.post('/:id/pages/:slot/validate-explanation', (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    const slot = Number(req.params.slot)
+    const page = getPage(getDb(), req.params.id, slot)
+    if (!page) {
+      res.status(404).json({ error: 'Página no encontrada' })
+      return
+    }
+    if (page.status !== 'Validada' && page.status !== 'Procesada') {
+      res.status(400).json({
+        error: 'Aprobá la transcripción antes de validar la explicación',
+      })
+      return
+    }
+
+    const body = req.body as {
+      explanation?: string
+      explanation_ai?: string
+      weight?: number
+    }
+    const weight = clampExplanationWeight(body.weight)
+    if (weight == null) {
+      res.status(400).json({ error: 'Valorá la explicación del 1 al 12' })
+      return
+    }
+
+    const split = splitExplanation(page.explanation, page.explanation_user)
+    const nextUser =
+      body.explanation !== undefined ? body.explanation.trim() : split.user
+    const nextAi =
+      body.explanation_ai !== undefined
+        ? body.explanation_ai.trim()
+        : split.ai
+    if (!nextAi) {
+      res.status(400).json({
+        error: 'No hay explicación para integrar. Generá explicaciones primero.',
+      })
+      return
+    }
+
+    const composed = composeExplanation(nextUser, nextAi)
+    const now = new Date().toISOString()
+    getDb()
+      .prepare(
+        `UPDATE pages SET
+          explanation = ?, explanation_user = ?, explanation_weight = ?,
+          updated_at = ?
+         WHERE id = ?`,
+      )
+      .run(composed, nextUser || null, weight, now, page.id)
+
+    if (page.status === 'Procesada' && page.quantomo_id) {
+      getDb()
+        .prepare(
+          `UPDATE quantomos SET content = ?, hermetic_weight = ?,
+           human_weight = ?, suggested_weight = ?
+           WHERE id = ?`,
+        )
+        .run(composed, weight, weight, weight, page.quantomo_id)
+      if (page.entry_id) {
+        getDb()
+          .prepare(`UPDATE entries SET human_weight = ? WHERE id = ?`)
+          .run(weight, page.entry_id)
+      }
+      const updated = getPage(getDb(), req.params.id, slot)
+      res.json({
+        ok: true,
+        page: updated,
+        already_in_corpus: true,
+        vision_queue: getNotebookVisionQueueStatus(req.params.id),
+      })
+      return
+    }
+
+    const result = enqueueNotebookConfirm(req.params.id, slot)
+    const updated = getPage(getDb(), req.params.id, slot)
+    res.json({
+      ok: true,
+      page: updated,
+      queued: true,
+      already: result.already,
+      already_in_corpus: false,
+      vision_queue: getNotebookVisionQueueStatus(req.params.id),
+    })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    console.error('[notebooks/validate-explanation]', err)
+    const msg = e.message || 'Error'
+    const client =
+      msg.includes('vacía') ||
+      msg.includes('Falta') ||
+      msg.includes('no encontrada') ||
+      msg.includes('Trinchera') ||
+      msg.includes('Aprobá') ||
+      msg.includes('Valorá')
     res.status(e.status || (client ? 400 : 500)).json({ error: msg })
   }
 })

@@ -369,7 +369,14 @@ export function parseManualTags(raw: string | null | undefined): BookmarkManualT
     for (const item of parsed) {
       if (!item || typeof item !== 'object') continue
       const o = item as Record<string, unknown>
-      const kind = o.kind === 'project' ? 'project' : o.kind === 'person' ? 'person' : null
+      const kind =
+        o.kind === 'project'
+          ? 'project'
+          : o.kind === 'dominio'
+            ? 'dominio'
+            : o.kind === 'person'
+              ? 'person'
+              : null
       const entity_id = String(o.entity_id ?? '').trim()
       const entity_name = String(o.entity_name ?? '').trim()
       if (!kind || !entity_id || !entity_name) continue
@@ -401,9 +408,14 @@ export function applyManualTagsAsLinks(
     if (tag.kind === 'person') {
       const exists = db.prepare(`SELECT id FROM persons WHERE id = ?`).get(tag.entity_id)
       if (!exists) continue
-    } else {
+    } else if (tag.kind === 'project') {
       const exists = db.prepare(`SELECT id FROM projects WHERE id = ?`).get(tag.entity_id)
       if (!exists) continue
+    } else if (tag.kind === 'dominio') {
+      const exists = db.prepare(`SELECT id FROM dominios WHERE id = ?`).get(tag.entity_id)
+      if (!exists) continue
+    } else {
+      continue
     }
     const already = db
       .prepare(

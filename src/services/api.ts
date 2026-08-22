@@ -2,11 +2,34 @@ import type {
   Agrupacion,
   AgrupacionGeneratedMeta,
   AgrupacionMember,
+  Dominio,
   Bookmark,
   BookmarkCounts,
   BookmarkManualTag,
   BookmarkProcessedRow,
   BookmarkQueueStatus,
+  CalendarOccurrence,
+  AmaList,
+  AmaListHydrated,
+  AmaListItem,
+  AmaListKind,
+  AmaMatrix,
+  AmaMatrixHydrated,
+  AmaCell,
+  AmaPlace,
+  AmaPlaceKind,
+  AmaFlow,
+  AmaLink,
+  AmaLinkObjectType,
+  AmaLinkTargetKind,
+  AmaCycleSlot,
+  AmaCycleState,
+  AmaOverview,
+  MapLayer,
+  MapOccupancyItem,
+  MapOverview,
+  MapSystem,
+  MapTag,
   ChatBlock,
   ChatMessage,
   ChatPreview,
@@ -38,6 +61,26 @@ import type {
   BlobNote,
   BlobTag,
   NotebookQueueStatus,
+  NotebookSource,
+  PendingTask,
+  AppRun,
+  DeproIdaItem,
+  DeproIdaStage,
+  DeproIdaKind,
+  DeproIdaCard,
+  DeproIdaCardDue,
+  DeproIdaCardGrade,
+  DeproIdaCardProposal,
+  DeproIdaNeighbor,
+  DeproPowerNote,
+  DeproPowerStatus,
+  DeproResearchFinding,
+  DeproResearchPack,
+  DialogoThread,
+  DialogoMessage,
+  DialogoEntityRef,
+  DialogoEntityRefType,
+  DashboardPin,
 } from '../types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -143,6 +186,19 @@ export const api = {
   getValidated: () =>
     request<{ entries: ProposalBundle[] }>('/api/entries/validated'),
 
+  getCalendarActivity: (from: string, to: string) => {
+    const qs = new URLSearchParams({ from, to })
+    return request<{ occurrences: CalendarOccurrence[] }>(
+      `/api/calendar/activity?${qs}`,
+    )
+  },
+
+  patchCalendarTask: (taskId: string, done: boolean) =>
+    request<{ ok: boolean; task: PendingTask }>(
+      `/api/calendar/tasks/${encodeURIComponent(taskId)}`,
+      { method: 'PATCH', body: JSON.stringify({ done }) },
+    ),
+
   runPipeline: (entryIds?: string[]) =>
     request<{
       ok: boolean
@@ -208,6 +264,8 @@ export const api = {
         person_id: string | null
         person_name: string | null
       }>
+      title?: string
+      timestamp_exact?: string
     },
   ) =>
     request<{ ok: boolean; entry: Entry }>(
@@ -227,6 +285,8 @@ export const api = {
         person_id: string | null
         person_name: string | null
       }>
+      title?: string
+      timestamp_exact?: string
     },
   ) =>
     request<{ ok: boolean; entry: Entry }>(
@@ -243,8 +303,10 @@ export const api = {
       title?: string
       rejectQuantomoIds?: string[]
       rejectTaskIds?: string[]
+      rejectEntityIds?: string[]
       quantomos?: Array<{ id: string; title: string; content: string }>
       tasks?: Array<{ id: string; task_text: string; tag: string }>
+      entities?: Array<{ id: string; name: string }>
     },
   ) =>
     request<{ ok: boolean; entity_proposals?: number }>(
@@ -326,7 +388,7 @@ export const api = {
   typeaheadEntities: (
     q: string,
     opts?: {
-      kinds?: Array<'person' | 'project' | 'quantomo' | 'agrupacion'>
+      kinds?: Array<'person' | 'project' | 'quantomo' | 'agrupacion' | 'dominio' | 'geografia'>
       limit?: number
       scope?: 'masters' | 'all'
       signal?: AbortSignal
@@ -339,7 +401,7 @@ export const api = {
     return request<{
       query: string
       results: Array<{
-        kind: 'person' | 'project' | 'quantomo' | 'agrupacion'
+        kind: 'person' | 'project' | 'quantomo' | 'agrupacion' | 'dominio' | 'geografia'
         id: string
         label: string
         subtitle: string
@@ -441,6 +503,110 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ master_id: masterId }),
     }),
+
+  listWaiting: () =>
+    request<{
+      items: Array<{
+        id: string
+        entity_type: 'person' | 'project' | 'geografia'
+        name: string
+        class_label: string
+        notes: string | null
+        created_at: string
+        link_count?: number
+        source_file?: string | null
+        source_type?: string | null
+        evidence_snippet?: string | null
+        entry_excerpt?: string | null
+        suggested_match: {
+          id: string
+          name: string
+          score: number
+          target_type: 'person' | 'project' | 'geografia'
+        } | null
+        cross_match: {
+          id: string
+          name: string
+          score: number
+          target_type: 'person' | 'project' | 'geografia'
+        } | null
+      }>
+      count: number
+      with_link_count?: number
+      orphan_count?: number
+      masters: {
+        persons: Array<{ id: string; name: string; kind: string }>
+        projects: Array<{ id: string; name: string; category: string }>
+        geografia?: Array<{ id: string; name: string; kind: string }>
+        agrupaciones?: Array<{ id: string; name: string; kind?: string }>
+        dominios?: Array<{ id: string; name: string; kind?: string }>
+      }
+    }>('/api/waiting'),
+
+  resolveWaiting: (
+    id: string,
+    body: {
+      from_type: 'person' | 'project' | 'geografia'
+      action: 'attach' | 'promote'
+      to_type?: 'person' | 'project' | 'geografia' | 'agrupacion' | 'dominio'
+      target_id?: string
+      targets?: Array<{
+        to_type: 'person' | 'project' | 'geografia' | 'agrupacion' | 'dominio'
+        target_id: string
+      }>
+      kind?: PersonKind | string
+      name?: string
+      title?: string
+      category?: string
+      status?: string
+      notes?: string
+    },
+  ) =>
+    request<{
+      ok: boolean
+      result_type:
+        | 'person'
+        | 'project'
+        | 'geografia'
+        | 'agrupacion'
+        | 'dominio'
+      result_id: string
+      alias_added?: string | null
+      attached?: number
+    }>(`/api/waiting/${id}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  discardWaiting: (body: {
+    items?: Array<{
+      id: string
+      from_type: 'person' | 'project' | 'geografia'
+    }>
+    all?: boolean
+    only?: 'suggested' | 'orphan' | 'all'
+  }) =>
+    request<{
+      ok: boolean
+      discarded: number
+      failed: number
+      ruido_id: string
+    }>('/api/waiting/discard', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  discardWaitingOne: (
+    id: string,
+    from_type: 'person' | 'project' | 'geografia',
+  ) =>
+    request<{ ok: true; ruido_id: string; name: string }>(
+      `/api/waiting/${id}/discard`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ from_type }),
+      },
+    ),
 
   promoteToProfile: (
     id: string,
@@ -546,6 +712,83 @@ export const api = {
       members: AgrupacionMember[]
       generated_meta: AgrupacionGeneratedMeta
     }>(`/api/agrupaciones/${id}/process`, { method: 'POST' }),
+
+  // —— Dominios ——
+  listDominios: () => request<{ dominios: Dominio[] }>('/api/dominios'),
+
+  getDominio: (id: string) =>
+    request<{ dominio: Dominio }>(`/api/dominios/${id}`),
+
+  createDominio: (body: { name: string; notes?: string }) =>
+    request<{ ok: boolean; dominio: Dominio }>('/api/dominios', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateDominio: (id: string, body: { name?: string; notes?: string }) =>
+    request<{ ok: boolean; dominio: Dominio }>(`/api/dominios/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteDominio: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/dominios/${id}`, {
+      method: 'DELETE',
+    }),
+
+  // —— Geografía ——
+  listGeografia: () =>
+    request<{
+      places: import('../types').Geografia[]
+      masters: import('../types').Geografia[]
+      waiting: import('../types').Geografia[]
+      waiting_count: number
+    }>('/api/geografia'),
+
+  getGeografia: (id: string) =>
+    request<{ place: import('../types').Geografia }>(`/api/geografia/${id}`),
+
+  createGeografia: (body: {
+    name: string
+    kind?: import('../types').GeoKind | string
+    aliases?: string[] | string
+    notes?: string
+  }) =>
+    request<{ ok: boolean; place: import('../types').Geografia }>(
+      '/api/geografia',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  updateGeografia: (
+    id: string,
+    body: {
+      name?: string
+      kind?: import('../types').GeoKind | string
+      aliases?: string[] | string
+      notes?: string
+    },
+  ) =>
+    request<{ ok: boolean; place: import('../types').Geografia }>(
+      `/api/geografia/${id}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  promoteGeografia: (id: string) =>
+    request<{ ok: boolean; place: import('../types').Geografia }>(
+      `/api/geografia/${id}/promote`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  deleteGeografia: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/geografia/${id}`, {
+      method: 'DELETE',
+    }),
 
   // —— Proyectos ——
   listProjects: () =>
@@ -1168,6 +1411,7 @@ export const api = {
       notebook: import('../types').Notebook
       pages: import('../types').NotebookPage[]
       index: import('../types').NotebookIndexEntry[]
+      sources?: import('../types').NotebookSource[]
       summary: {
         total: number
         vacias: number
@@ -1235,6 +1479,31 @@ export const api = {
     }>(`/api/notebooks/${id}/ingest-images`, { method: 'POST', body: form })
   },
 
+  uploadNotebookSources: (id: string, files: File[], note?: string) => {
+    const form = new FormData()
+    for (const f of files) form.append('files', f)
+    if (note?.trim()) form.append('note', note.trim())
+    return request<{ sources: NotebookSource[]; warning?: string }>(
+      `/api/notebooks/${id}/sources`,
+      { method: 'POST', body: form },
+    )
+  },
+
+  addNotebookSourceNote: (id: string, text: string) =>
+    request<{ source: NotebookSource }>(`/api/notebooks/${id}/sources/note`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+
+  listNotebookSources: (id: string) =>
+    request<{ sources: NotebookSource[] }>(`/api/notebooks/${id}/sources`),
+
+  deleteNotebookSource: (id: string, sourceId: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/notebooks/${id}/sources/${sourceId}`,
+      { method: 'DELETE' },
+    ),
+
   getNotebookPage: (id: string, slot: number) =>
     request<{
       page: import('../types').NotebookPage
@@ -1253,6 +1522,8 @@ export const api = {
       numero_logico?: number
       posicion_visual?: string
       explanation?: string
+      explanation_ai?: string
+      explanation_weight?: number | null
       mentioned_entities?: import('../types').BlobTag[]
     },
   ) =>
@@ -1325,6 +1596,27 @@ export const api = {
       vision_queue: NotebookQueueStatus
     }>(`/api/notebooks/${id}/pages/${slot}/confirm`, { method: 'POST' }),
 
+  validateNotebookExplanation: (
+    id: string,
+    slot: number,
+    body: {
+      weight: number
+      explanation_ai?: string
+      explanation?: string
+    },
+  ) =>
+    request<{
+      ok: boolean
+      page: import('../types').NotebookPage
+      queued?: boolean
+      already?: boolean
+      already_in_corpus?: boolean
+      vision_queue: NotebookQueueStatus
+    }>(`/api/notebooks/${id}/pages/${slot}/validate-explanation`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   approveNotebookTranscription: (id: string, slot: number) =>
     request<{
       ok: boolean
@@ -1367,6 +1659,48 @@ export const api = {
       skipped: number
       vision_queue: NotebookQueueStatus
     }>(`/api/notebooks/${id}/send-to-corpus`, { method: 'POST' }),
+
+  validateAllNotebookExplanations: (id: string, weight = 7) =>
+    request<{
+      ok: boolean
+      queued: number
+      skipped: number
+      stamped: number
+      vision_queue: NotebookQueueStatus
+    }>(`/api/notebooks/${id}/validate-all-explanations`, {
+      method: 'POST',
+      body: JSON.stringify({ weight }),
+    }),
+
+  exportNotebook: async (id: string, titleHint?: string) => {
+    const res = await fetch(`/api/notebooks/${id}/export`)
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`
+      try {
+        const body = (await res.json()) as { error?: string }
+        if (body.error) message = body.error
+      } catch {
+        /* ignore */
+      }
+      throw new Error(message)
+    }
+    const blob = await res.blob()
+    const cd = res.headers.get('Content-Disposition') || ''
+    const match = /filename="([^"]+)"/.exec(cd)
+    const day = new Date().toISOString().slice(0, 10)
+    const fallback = `cuaderno-${(titleHint || 'export')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/gi, '-')
+      .replace(/^-+|-+$/g, '') || 'export'}-${day}.zip`
+    const filename = match?.[1] || fallback
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    return { ok: true as const, filename }
+  },
 
   saveNotebookCanvas: (
     id: string,
@@ -1480,11 +1814,48 @@ export const api = {
       { method: 'POST', body: JSON.stringify({}) },
     ),
 
+  getRun: () =>
+    request<{ ok: boolean; run: AppRun | null }>('/api/run'),
+
+  startRun: (name: string) =>
+    request<{ ok: true; run: AppRun }>('/api/run/start', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  newUserRun: (opts: {
+    confirmDestroy: string
+    operatorName: string
+    newName: string
+  }) =>
+    request<{
+      ok: true
+      filename: string
+      backup_path: string
+      dump: unknown
+      run: AppRun
+    }>('/api/run/new-user', {
+      method: 'POST',
+      body: JSON.stringify({
+        confirm_destroy: opts.confirmDestroy,
+        operator_name: opts.operatorName,
+        new_name: opts.newName,
+      }),
+    }),
+
   backupSummary: () =>
     request<{
       ok: boolean
       exported_at: string
       include_media: false
+      run: {
+        id: string
+        operator_name: string
+        operator_id: string
+        started_at: string
+        ended_at: string | null
+        day_count: number
+      } | null
       tables: Record<string, number>
       groups: {
         transcripciones: number
@@ -1523,6 +1894,717 @@ export const api = {
       { method: 'POST', body: form },
     )
   },
+
+  amazonaOverview: () =>
+    request<{ ok: boolean; overview: AmaOverview; cycle: AmaCycleState }>(
+      '/api/amazona/overview',
+    ),
+
+  amazonaCycle: () =>
+    request<{ ok: boolean; cycle: AmaCycleState }>('/api/amazona/cycle'),
+
+  amazonaAdvanceCycle: () =>
+    request<{ ok: boolean; cycle: AmaCycleState }>('/api/amazona/cycle/advance', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  amazonaListLists: (opts?: { kind?: AmaListKind; q?: string }) => {
+    const qs = new URLSearchParams()
+    if (opts?.kind) qs.set('kind', opts.kind)
+    if (opts?.q) qs.set('q', opts.q)
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return request<{ ok: boolean; lists: AmaList[] }>(`/api/amazona/lists${suffix}`)
+  },
+
+  amazonaGetList: (id: string) =>
+    request<{ ok: boolean; list: AmaListHydrated; links: AmaLink[] }>(
+      `/api/amazona/lists/${id}`,
+    ),
+
+  amazonaCreateList: (body: {
+    title: string
+    notes?: string
+    kind: AmaListKind
+    tags?: string[] | string
+    tridente_a_id?: string
+    tridente_b_id?: string
+    items?: Array<{ label?: string; notes?: string }>
+  }) =>
+    request<{ ok: boolean; list: AmaListHydrated }>('/api/amazona/lists', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaUpdateList: (
+    id: string,
+    body: {
+      title?: string
+      notes?: string
+      tags?: string[] | string
+      tridente_a_id?: string
+      tridente_b_id?: string
+    },
+  ) =>
+    request<{ ok: boolean; list: AmaListHydrated }>(`/api/amazona/lists/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaDeleteList: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/amazona/lists/${id}`, {
+      method: 'DELETE',
+    }),
+
+  amazonaPutListItems: (
+    id: string,
+    items: Array<{
+      id?: string
+      label?: string
+      notes?: string
+      place_id?: string | null
+    }>,
+  ) =>
+    request<{ ok: boolean; list: AmaListHydrated }>(
+      `/api/amazona/lists/${id}/items`,
+      { method: 'PUT', body: JSON.stringify({ items }) },
+    ),
+
+  amazonaUpdateItem: (
+    id: string,
+    body: {
+      label?: string
+      notes?: string
+      place_id?: string | null
+    },
+  ) =>
+    request<{ ok: boolean; item: AmaListItem }>(`/api/amazona/items/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaAddChildItem: (id: string, body: { label: string; notes?: string }) =>
+    request<{ ok: boolean; item: AmaListItem }>(
+      `/api/amazona/items/${id}/children`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  amazonaDeleteItem: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/amazona/items/${id}`, {
+      method: 'DELETE',
+    }),
+
+  amazonaListMatrices: (order_n?: 3 | 6) => {
+    const qs = order_n ? `?order_n=${order_n}` : ''
+    return request<{ ok: boolean; matrices: AmaMatrix[] }>(
+      `/api/amazona/matrices${qs}`,
+    )
+  },
+
+  amazonaGetMatrix: (id: string) =>
+    request<{
+      ok: boolean
+      matrix: AmaMatrixHydrated
+      links: AmaLink[]
+    }>(`/api/amazona/matrices/${id}`),
+
+  amazonaCreateMatrix: (body: {
+    title: string
+    notes?: string
+    order_n?: 3 | 6
+    row_list_id: string
+    col_list_id: string
+    tags?: string[] | string
+  }) =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated }>('/api/amazona/matrices', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaCreateExampleMatrix: () =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated; reused?: boolean }>(
+      '/api/amazona/matrices/example',
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  amazonaUpdateMatrix: (
+    id: string,
+    body: { title?: string; notes?: string; tags?: string[] | string },
+  ) =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated }>(
+      `/api/amazona/matrices/${id}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  amazonaDeleteMatrix: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/amazona/matrices/${id}`, {
+      method: 'DELETE',
+    }),
+
+  amazonaSwapMatrix: (id: string) =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated }>(
+      `/api/amazona/matrices/${id}/swap`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  amazonaSwapNeo: (id: string) =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated }>(
+      `/api/amazona/matrices/${id}/neo/swap`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  amazonaPatchCell: (
+    matrixId: string,
+    body: {
+      row_item_id: string
+      col_item_id: string
+      title?: string | null
+      notes?: string
+      cycle_slot?: AmaCycleSlot | null
+      place_id?: string | null
+    },
+  ) =>
+    request<{ ok: boolean; cell: AmaCell; matrix: AmaMatrixHydrated }>(
+      `/api/amazona/matrices/${matrixId}/cells`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  amazonaPatchNeo: (
+    matrixId: string,
+    body: { title_index: number; cycle_slot: AmaCycleSlot; notes: string },
+  ) =>
+    request<{ ok: boolean; matrix: AmaMatrixHydrated }>(
+      `/api/amazona/matrices/${matrixId}/neo`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  amazonaListPlaces: () =>
+    request<{ ok: boolean; places: AmaPlace[] }>('/api/amazona/places'),
+
+  amazonaCreatePlace: (body: {
+    name: string
+    notes?: string
+    lat?: number | null
+    lng?: number | null
+    kind?: AmaPlaceKind
+    tags?: string[] | string
+  }) =>
+    request<{ ok: boolean; place: AmaPlace }>('/api/amazona/places', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaPingPlace: (body: {
+    lat: number
+    lng: number
+    name?: string
+    notes?: string
+    snap?: boolean
+  }) =>
+    request<{
+      ok: boolean
+      snapped: boolean
+      meters: number | null
+      place: AmaPlace
+    }>('/api/amazona/places/ping', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaUpdatePlace: (
+    id: string,
+    body: {
+      name?: string
+      notes?: string
+      lat?: number | null
+      lng?: number | null
+      kind?: AmaPlaceKind
+      tags?: string[] | string
+    },
+  ) =>
+    request<{ ok: boolean; place: AmaPlace }>(`/api/amazona/places/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaDeletePlace: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/amazona/places/${id}`, {
+      method: 'DELETE',
+    }),
+
+  amazonaListFlows: () =>
+    request<{ ok: boolean; flows: AmaFlow[] }>('/api/amazona/flows'),
+
+  amazonaCreateFlow: (body: {
+    from_place_id: string
+    to_place_id: string
+    recorded_at?: string
+    notes?: string
+    cycle_slot?: AmaCycleSlot | null
+  }) =>
+    request<{ ok: boolean; flow: AmaFlow }>('/api/amazona/flows', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaDeleteFlow: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/amazona/flows/${id}`, {
+      method: 'DELETE',
+    }),
+
+  amazonaListLinks: (object_type: AmaLinkObjectType, object_id: string) => {
+    const qs = new URLSearchParams({ object_type, object_id })
+    return request<{ ok: boolean; links: AmaLink[] }>(
+      `/api/amazona/links?${qs}`,
+    )
+  },
+
+  amazonaCreateLink: (body: {
+    object_type: AmaLinkObjectType
+    object_id: string
+    target_kind: AmaLinkTargetKind
+    target_id: string
+    role?: string
+  }) =>
+    request<{ ok: boolean; links: AmaLink[] }>('/api/amazona/links', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  amazonaDeleteLink: (id: string) =>
+    request<{ ok: boolean; id: string; links: AmaLink[] }>(
+      `/api/amazona/links/${id}`,
+      { method: 'DELETE' },
+    ),
+
+  mapOverview: (systemId?: string) => {
+    const qs = systemId
+      ? `?${new URLSearchParams({ system_id: systemId })}`
+      : ''
+    return request<{ ok: boolean } & MapOverview>(`/api/map/overview${qs}`)
+  },
+
+  mapCreateSystem: (body: {
+    name: string
+    notes?: string
+    center_lat: number
+    center_lng: number
+    zoom?: number
+    pitch?: number
+    bearing?: number
+    copy_from?: string | null
+  }) =>
+    request<{ ok: boolean; system: MapSystem }>('/api/map/systems', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  mapPatchSystem: (
+    id: string,
+    body: {
+      name?: string
+      notes?: string
+      center_lat?: number
+      center_lng?: number
+      zoom?: number
+      pitch?: number
+      bearing?: number
+    },
+  ) =>
+    request<{ ok: boolean; system: MapSystem }>(`/api/map/systems/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  mapDeleteSystem: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/map/systems/${id}`, {
+      method: 'DELETE',
+    }),
+
+  mapPatchLayer: (
+    id: string,
+    body: { visible?: number | boolean; opacity?: number; title?: string },
+  ) =>
+    request<{ ok: boolean; layer: MapLayer }>(`/api/map/layers/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  mapCreateTag: (body: {
+    system_id: string
+    lat: number
+    lng: number
+    label: string
+    notes?: string
+    place_id?: string | null
+    layer_id?: string | null
+    target_kind?: string | null
+    target_id?: string | null
+  }) =>
+    request<{ ok: boolean; tag: MapTag }>('/api/map/tags', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  mapDeleteTag: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/map/tags/${id}`, {
+      method: 'DELETE',
+    }),
+
+  mapOccupancy: (placeId: string) => {
+    const qs = new URLSearchParams({ place_id: placeId })
+    return request<{
+      ok: boolean
+      place_id: string
+      place_name: string
+      items: MapOccupancyItem[]
+    }>(`/api/map/occupancy?${qs}`)
+  },
+
+  mapOccupy: (body: {
+    place_id: string
+    kind: 'person' | 'project' | 'agrupacion' | 'entry'
+    id: string
+  }) =>
+    request<{ ok: boolean }>('/api/map/occupy', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  mapUnoccupy: (body: {
+    place_id: string
+    kind: 'person' | 'project' | 'agrupacion' | 'entry'
+    id: string
+  }) =>
+    request<{ ok: boolean }>('/api/map/occupy', {
+      method: 'DELETE',
+      body: JSON.stringify(body),
+    }),
+
+  mapH3: (lat: number, lng: number, res?: number, k?: number) => {
+    const qs = new URLSearchParams({
+      lat: String(lat),
+      lng: String(lng),
+    })
+    if (res != null) qs.set('res', String(res))
+    if (k != null) qs.set('k', String(k))
+    return request<{
+      ok: boolean
+      cell: string
+      disk: string[]
+      resolution: number
+    }>(`/api/map/h3?${qs}`)
+  },
+
+  mapSearchEntries: (q: string) => {
+    const qs = new URLSearchParams({ q })
+    return request<{
+      ok: boolean
+      entries: Array<{
+        id: string
+        title: string
+        status: string
+        source_type: string
+        place_id: string | null
+      }>
+    }>(`/api/map/search-entries?${qs}`)
+  },
+
+  deprocastCatalog: () =>
+    request<{
+      ok: boolean
+      power_notes: DeproPowerNote[]
+      ida: DeproIdaItem[]
+      ida_matrix: AmaMatrixHydrated | null
+    }>('/api/deprocast/catalog'),
+
+  deprocastPatchPower: (
+    index: number,
+    body: { notes?: string; status?: DeproPowerStatus | null },
+  ) =>
+    request<{ ok: boolean; note: DeproPowerNote }>(
+      `/api/deprocast/powers/${index}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  deprocastListIda: (archived = false) => {
+    const qs = archived ? '?archived=1' : ''
+    return request<{ ok: boolean; items: DeproIdaItem[] }>(
+      `/api/deprocast/ida${qs}`,
+    )
+  },
+
+  deprocastCreateIda: (body: {
+    title: string
+    body?: string
+    stage?: DeproIdaStage
+    power_indexes?: number[]
+    agent_ids?: string[]
+    tags?: string[]
+    matrix_id?: string | null
+    row_item_id?: string | null
+    col_item_id?: string | null
+    weight?: number | null
+    kind?: DeproIdaKind
+    domain_ids?: string[]
+  }) =>
+    request<{ ok: boolean; item: DeproIdaItem }>('/api/deprocast/ida', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deprocastPatchIda: (
+    id: string,
+    body: {
+      title?: string
+      body?: string
+      stage?: DeproIdaStage
+      power_indexes?: number[]
+      agent_ids?: string[]
+      tags?: string[]
+      archived?: boolean
+      matrix_id?: string | null
+      row_item_id?: string | null
+      col_item_id?: string | null
+      weight?: number | null
+      kind?: DeproIdaKind
+      domain_ids?: string[]
+    },
+  ) =>
+    request<{ ok: boolean; item: DeproIdaItem }>(`/api/deprocast/ida/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deprocastDeleteIda: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/deprocast/ida/${id}`, {
+      method: 'DELETE',
+    }),
+
+  deprocastIdaDue: () =>
+    request<{ ok: boolean; cards: DeproIdaCardDue[] }>(
+      '/api/deprocast/ida/due',
+    ),
+
+  deprocastIdaExport: () =>
+    request<{ ok: boolean; markdown: string }>('/api/deprocast/ida/export'),
+
+  deprocastIdaNeighbors: (id: string) =>
+    request<{ ok: boolean; neighbors: DeproIdaNeighbor[] }>(
+      `/api/deprocast/ida/${id}/neighbors`,
+    ),
+
+  deprocastProposeIdaCards: (id: string) =>
+    request<{ ok: boolean; cards: DeproIdaCardProposal[] }>(
+      `/api/deprocast/ida/${id}/propose-cards`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  deprocastListIdaCards: (id: string) =>
+    request<{ ok: boolean; cards: DeproIdaCard[] }>(
+      `/api/deprocast/ida/${id}/cards`,
+    ),
+
+  deprocastCreateIdaCard: (
+    id: string,
+    body: { question: string; answer?: string },
+  ) =>
+    request<{ ok: boolean; card: DeproIdaCard }>(
+      `/api/deprocast/ida/${id}/cards`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deprocastPatchIdaCard: (
+    cardId: string,
+    body: { question?: string; answer?: string; due_at?: string | null },
+  ) =>
+    request<{ ok: boolean; card: DeproIdaCard }>(
+      `/api/deprocast/ida/cards/${cardId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  deprocastReviewIdaCard: (cardId: string, grade: DeproIdaCardGrade) =>
+    request<{ ok: boolean; card: DeproIdaCard }>(
+      `/api/deprocast/ida/cards/${cardId}/review`,
+      { method: 'POST', body: JSON.stringify({ grade }) },
+    ),
+
+  deprocastDeleteIdaCard: (cardId: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/deprocast/ida/cards/${cardId}`,
+      { method: 'DELETE' },
+    ),
+
+  deprocastListResearchPacks: (status?: string) => {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : ''
+    return request<{ ok: boolean; packs: DeproResearchPack[] }>(
+      `/api/deprocast/research/packs${qs}`,
+    )
+  },
+
+  deprocastGetResearchPack: (id: string) =>
+    request<{
+      ok: boolean
+      pack: DeproResearchPack
+      findings: DeproResearchFinding[]
+    }>(`/api/deprocast/research/packs/${id}`),
+
+  deprocastResearchPrompt: (topic: string) =>
+    request<{ ok: boolean; topic: string; prompt: string }>(
+      '/api/deprocast/research/prompt',
+      { method: 'POST', body: JSON.stringify({ topic }) },
+    ),
+
+  deprocastResearchIngest: (body: {
+    payload: string
+    agent_id?: string
+    prompt_key?: string
+    parent_finding_id?: string | null
+    parent_pack_id?: string | null
+  }) =>
+    request<{
+      ok: boolean
+      pack: DeproResearchPack
+      findings: DeproResearchFinding[]
+    }>('/api/deprocast/research/ingest', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  deprocastResearchRun: (body: {
+    topic: string
+    agent_id?: string
+    prompt_key?: string
+  }) =>
+    request<{ ok: boolean; pack: DeproResearchPack }>(
+      '/api/deprocast/research/run',
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deprocastAssimilateFinding: (
+    id: string,
+    body?: {
+      row_item_id?: string | null
+      col_item_id?: string | null
+      matrix_id?: string | null
+      domain_ids?: string[]
+    },
+  ) =>
+    request<{
+      ok: boolean
+      finding: DeproResearchFinding
+      item: DeproIdaItem
+    }>(`/api/deprocast/research/findings/${id}/assimilate`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
+
+  deprocastDiscardFinding: (id: string) =>
+    request<{ ok: boolean; finding: DeproResearchFinding }>(
+      `/api/deprocast/research/findings/${id}/discard`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  deprocastFractalizeFinding: (id: string) =>
+    request<{
+      ok: boolean
+      topic: string
+      prompt: string
+      parent_finding_id: string
+      parent_pack_id: string
+    }>(`/api/deprocast/research/findings/${id}/fractalize`, {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  deprocastAssimilatePending: (
+    packId: string,
+    body?: {
+      row_item_id?: string | null
+      col_item_id?: string | null
+      matrix_id?: string | null
+      domain_ids?: string[]
+    },
+  ) =>
+    request<{ ok: boolean; items: DeproIdaItem[]; count: number }>(
+      `/api/deprocast/research/packs/${packId}/assimilate-pending`,
+      { method: 'POST', body: JSON.stringify(body ?? {}) },
+    ),
+
+  deprocastDiscardPending: (packId: string) =>
+    request<{ ok: boolean; count: number }>(
+      `/api/deprocast/research/packs/${packId}/discard-pending`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  deprocastDeleteResearchPack: (packId: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/deprocast/research/packs/${packId}`,
+      { method: 'DELETE' },
+    ),
+
+  listDialogoThreads: () =>
+    request<{ ok: boolean; threads: DialogoThread[] }>('/api/dialogo/threads'),
+
+  createDialogoThread: (body: {
+    title?: string
+    section_key?: string | null
+    entity_refs?: DialogoEntityRef[]
+  }) =>
+    request<{ ok: boolean; thread: DialogoThread }>('/api/dialogo/threads', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  getDialogoThread: (id: string) =>
+    request<{
+      ok: boolean
+      thread: DialogoThread
+      messages: DialogoMessage[]
+    }>(`/api/dialogo/threads/${id}`),
+
+  updateDialogoThread: (
+    id: string,
+    body: {
+      title?: string
+      section_key?: string | null
+      entity_refs?: DialogoEntityRef[]
+    },
+  ) =>
+    request<{ ok: boolean; thread: DialogoThread }>(
+      `/api/dialogo/threads/${id}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  postDialogoMessage: (id: string, content: string) =>
+    request<{
+      ok: boolean
+      user: DialogoMessage
+      assistant: DialogoMessage
+      thread: DialogoThread
+    }>(`/api/dialogo/threads/${id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+
+  listDashboardPins: () =>
+    request<{ ok: boolean; pins: DashboardPin[] }>('/api/dialogo/pins'),
+
+  setDashboardPins: (
+    pins: Array<{
+      slot: number
+      ref_type: DialogoEntityRefType
+      ref_id: string
+      label: string
+    }>,
+  ) =>
+    request<{ ok: boolean; pins: DashboardPin[] }>('/api/dialogo/pins', {
+      method: 'PUT',
+      body: JSON.stringify({ pins }),
+    }),
 }
 
 export type { Entry, ProposalBundle, Person, Project, EntityProposalView }

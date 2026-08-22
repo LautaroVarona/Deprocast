@@ -717,6 +717,19 @@ export function ProjectsSection({
                 const busy = busyId === p.id || busyAll
                 return (
                   <li key={p.id} className="proposal-card">
+                    <label className="field proposal-mention-field">
+                      <input
+                        className="proposal-mention-input"
+                        value={draftTitles[p.id] ?? p.suggested_name}
+                        onChange={(e) =>
+                          setDraftTitles((d) => ({
+                            ...d,
+                            [p.id]: e.target.value,
+                          }))
+                        }
+                        aria-label="Título"
+                      />
+                    </label>
                     <div className="proposal-card-head">
                       <span
                         className={
@@ -726,18 +739,6 @@ export function ProjectsSection({
                         {match ? 'Posible vínculo' : 'Mención'}
                       </span>
                     </div>
-                    <label className="field">
-                      <span className="mono">Título</span>
-                      <input
-                        value={draftTitles[p.id] ?? p.suggested_name}
-                        onChange={(e) =>
-                          setDraftTitles((d) => ({
-                            ...d,
-                            [p.id]: e.target.value,
-                          }))
-                        }
-                      />
-                    </label>
                     <label className="field">
                       <span className="mono">Tipo</span>
                       <select
@@ -1173,7 +1174,7 @@ export function ProjectsSection({
             <div>
               <h2>Sala de espera</h2>
               <p className="muted mono">
-                Menciones validadas sin maestro
+                General · corpus sin ficha maestra
                 {waiting.length > 0 ? ` · ${waiting.length}` : ''}
                 {matchedWaiting.length > 0
                   ? ` · ${matchedWaiting.length} sugeridas`

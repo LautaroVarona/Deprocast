@@ -37,7 +37,7 @@ export function TagField({
   tags,
   note,
   onChange,
-  placeholder = '@ etiquetá perfiles. Texto libre opcional.',
+  placeholder = '@ etiquetá perfiles, proyectos o dominios. Texto libre opcional.',
   disabled,
 }: Props) {
   const [mentionOpen, setMentionOpen] = useState(false)
@@ -90,18 +90,25 @@ export function TagField({
       void (async () => {
         try {
           const res = await api.typeaheadEntities(query, {
-            kinds: ['person', 'project'],
+            kinds: ['person', 'project', 'dominio'],
             limit: 10,
             scope: 'masters',
             signal: ac.signal,
           })
           if (ac.signal.aborted) return
-          const hits: MentionMenuHit[] = res.results.map((h) => ({
-            kind: h.kind === 'project' ? 'project' : 'person',
-            entity_id: h.id,
-            entity_name: h.label,
-            subtitle: h.subtitle,
-          }))
+          const hits: MentionMenuHit[] = res.results
+            .filter(
+              (h): h is typeof h & { kind: BookmarkManualTag['kind'] } =>
+                h.kind === 'person' ||
+                h.kind === 'project' ||
+                h.kind === 'dominio',
+            )
+            .map((h) => ({
+              kind: h.kind,
+              entity_id: h.id,
+              entity_name: h.label,
+              subtitle: h.subtitle,
+            }))
           setMentionHits(hits)
           setMentionIdx(0)
         } catch {
@@ -126,7 +133,7 @@ export function TagField({
           (t) => !(t.kind === hit.kind && t.entity_id === hit.entity_id),
         ),
         {
-          kind: hit.kind === 'project' ? 'project' : 'person',
+          kind: hit.kind,
           entity_id: hit.entity_id,
           entity_name: hit.entity_name,
         } satisfies BookmarkManualTag,

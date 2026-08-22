@@ -95,6 +95,28 @@ export type NotebookQueueStatus = {
   logs: NotebookProcessLog[]
 }
 
+export type NotebookSourceKind =
+  | 'pdf'
+  | 'image'
+  | 'audio'
+  | 'note'
+  | 'spreadsheet'
+  | 'json'
+
+export type NotebookSourceStatus = 'queued' | 'processing' | 'ready' | 'error'
+
+export interface NotebookSource {
+  id: string
+  notebook_id: string
+  kind: NotebookSourceKind
+  vault_path: string | null
+  original_name: string
+  status: NotebookSourceStatus
+  payload_json: string
+  created_at: string
+  updated_at: string
+}
+
 export interface NotebookPage {
   id: string
   notebook_id: string
@@ -112,6 +134,7 @@ export interface NotebookPage {
   quantomo_id: string | null
   explanation: string | null
   explanation_user?: string | null
+  explanation_weight?: number | null
   mentioned_entities?: string | null
   created_at: string
   updated_at: string
@@ -155,6 +178,7 @@ export interface Entry {
   diarization_json?: string | null
   speaker_map?: string | null
   duration_sec?: number | null
+  place_id?: string | null
 }
 
 export interface Quantomo {
@@ -218,12 +242,12 @@ export interface Bookmark {
 }
 
 export interface BookmarkManualTag {
-  kind: 'person' | 'project'
+  kind: 'person' | 'project' | 'dominio'
   entity_id: string
   entity_name: string
 }
 
-export type BlobTagKind = 'person' | 'project' | 'agrupacion'
+export type BlobTagKind = 'person' | 'project' | 'agrupacion' | 'dominio'
 
 export interface BlobTag {
   kind: BlobTagKind
@@ -353,6 +377,7 @@ export type PersonKind =
   | 'ficticia'
   | 'abstracta'
   | 'ruido'
+  | 'geografia'
   | 'agrupacion'
 
 export type ProjectStatus = 'activo' | 'pausado' | 'cerrado' | 'emergente'
@@ -370,9 +395,18 @@ export type PersonProjectRole =
   | 'interesado'
   | 'co_mentioned'
 
+export interface EntryEntityRaw {
+  id: string
+  entry_id: string
+  name: string
+  type: string
+  payload: string
+}
+
 export interface ProposalBundle extends Entry {
   quantomos: Quantomo[]
   tasks: PendingTask[]
+  entities?: EntryEntityRaw[]
   file_metadata?: ValidatedFileMetadata | null
 }
 
@@ -478,9 +512,48 @@ export interface AgrupacionMember {
   person_source?: string
 }
 
+/** Área de vida/conocimiento. Fijos: Salud, Finanzas, Derecho, Tecnología, Arte. */
+export interface Dominio {
+  id: string
+  name: string
+  notes: string | null
+  is_fixed: number
+  created_at: string
+  updated_at: string
+}
+
+export type GeoKind =
+  | 'lugar'
+  | 'calle'
+  | 'ciudad'
+  | 'barrio'
+  | 'region'
+  | 'pais'
+  | 'otro'
+
+/** Lugar del corpus (categoría Geografía en Entidades). */
+export interface Geografia {
+  id: string
+  name: string
+  kind: GeoKind
+  aliases: string
+  aliases_list?: string[]
+  notes: string | null
+  status: string
+  source: 'manual' | 'extractor' | string
+  merged_into?: string | null
+  created_at: string
+  updated_at: string
+  suggested_match?: {
+    id: string
+    name: string
+    score: number
+  } | null
+}
+
 export interface EntityLink {
   id: string
-  entity_kind: 'person' | 'project'
+  entity_kind: 'person' | 'project' | 'geografia'
   entity_id: string
   entry_id: string
   quantomo_id: string | null
@@ -735,4 +808,558 @@ export interface ChatPreview {
   first_ts: string | null
   last_ts: string | null
   origin_hash: string
+}
+
+export type CalendarPole = 'ingested' | 'native'
+
+export interface CalendarTask {
+  id: string
+  entry_id: string
+  task_text: string
+  tag: string | null
+  status: string
+}
+
+export interface CalendarOccurrence {
+  id: string
+  record_id: string
+  pole: CalendarPole
+  at: string
+  source_type: string
+  title: string
+  status: string
+  tasks: CalendarTask[]
+  hermetic_weight: number | null
+  human_weight: number | null
+  other_at: string | null
+}
+
+export type AmaListKind =
+  | 'tridente'
+  | 'lista6'
+  | 'base12'
+  | 'base22'
+  | 'base72'
+
+export type AmaCycleSlot = 'ayer' | 'hoy' | 'manana'
+
+export type AmaPlaceKind = 'lugar' | 'enclave' | 'ruta' | 'region'
+
+export type AmaLinkObjectType =
+  | 'list'
+  | 'item'
+  | 'matrix'
+  | 'cell'
+  | 'place'
+  | 'flow'
+
+export type AmaLinkTargetKind = 'person' | 'project' | 'place' | 'agrupacion'
+
+export interface AmaList {
+  id: string
+  title: string
+  notes: string
+  size: number
+  kind: AmaListKind
+  source: 'seed' | 'manual' | 'composed'
+  tags: string
+  tags_list?: string[]
+  created_at: string
+  updated_at: string
+  item_count?: number
+}
+
+export interface AmaListItem {
+  id: string
+  list_id: string
+  position: number
+  label: string
+  notes: string
+  place_id: string | null
+  parent_item_id: string | null
+  created_at: string
+  updated_at: string
+  place_name?: string | null
+  children?: AmaListItem[]
+}
+
+export interface AmaLista6Parts {
+  lista6_id: string
+  tridente_a_id: string
+  tridente_b_id: string
+  tridente_a_title?: string
+  tridente_b_title?: string
+}
+
+export interface AmaListHydrated extends AmaList {
+  items: AmaListItem[]
+  composition: AmaLista6Parts | null
+}
+
+export interface AmaMatrix {
+  id: string
+  title: string
+  notes: string
+  order_n: 3 | 6
+  row_list_id: string
+  col_list_id: string
+  tags: string
+  tags_list?: string[]
+  neo_swapped: number
+  created_at: string
+  updated_at: string
+  row_title?: string
+  col_title?: string
+  cell_notes_count?: number
+}
+
+export interface AmaCell {
+  id: string
+  matrix_id: string
+  row_item_id: string
+  col_item_id: string
+  title: string | null
+  notes: string
+  cycle_slot: AmaCycleSlot | null
+  display_slot?: AmaCycleSlot | null
+  place_id: string | null
+  created_at: string
+  updated_at: string
+  place_name?: string | null
+}
+
+export interface AmaNeoCell {
+  id: string
+  matrix_id: string
+  title_index: number
+  cycle_slot: AmaCycleSlot
+  notes: string
+  display_slot?: AmaCycleSlot
+}
+
+export interface AmaMatrixHydrated extends AmaMatrix {
+  row_list: AmaListHydrated
+  col_list: AmaListHydrated
+  cells: AmaCell[]
+  neo_cells: AmaNeoCell[]
+}
+
+export type MapZoneRole = 'nucleo' | 'sector' | 'micro' | 'ruta'
+
+export type MapLayerKind =
+  | 'basemap'
+  | 'fisico'
+  | 'h3'
+  | 'occupancy'
+  | 'amazona'
+  | 'aristas'
+  | 'chronos'
+  | 'tags'
+  | 'custom'
+
+export interface AmaPlace {
+  id: string
+  name: string
+  notes: string
+  lat: number | null
+  lng: number | null
+  kind: AmaPlaceKind
+  tags: string
+  tags_list?: string[]
+  parent_id?: string | null
+  h3_index?: string | null
+  zone_code?: string | null
+  role?: MapZoneRole | string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface MapSystem {
+  id: string
+  name: string
+  notes: string
+  center_lat: number
+  center_lng: number
+  zoom: number
+  pitch: number
+  bearing: number
+  created_at: string
+  updated_at: string
+}
+
+export interface MapLayer {
+  id: string
+  system_id: string
+  kind: MapLayerKind
+  title: string
+  visible: number
+  opacity: number
+  z_index: number
+  config_json: string
+  created_at: string
+  updated_at: string
+}
+
+export interface MapTag {
+  id: string
+  system_id: string
+  layer_id: string | null
+  lat: number
+  lng: number
+  h3_index: string | null
+  place_id: string | null
+  label: string
+  notes: string
+  target_kind: string | null
+  target_id: string | null
+  created_at: string
+  updated_at: string
+  place_name?: string | null
+  target_label?: string | null
+}
+
+export interface MapOccupancyCounts {
+  place_id: string
+  persons: number
+  projects: number
+  agrupaciones: number
+  entries: number
+  amazona_items: number
+  amazona_cells: number
+  tags: number
+  total: number
+}
+
+export type MapOccupancyKind =
+  | 'person'
+  | 'project'
+  | 'agrupacion'
+  | 'entry'
+  | 'item'
+  | 'cell'
+  | 'tag'
+
+export interface MapOccupancyItem {
+  kind: MapOccupancyKind
+  id: string
+  label: string
+  subtitle?: string
+  link_id?: string
+}
+
+export interface MapMoonState {
+  phase: number
+  illumination: number
+  label: string
+}
+
+export interface MapOverview {
+  system: MapSystem
+  systems: MapSystem[]
+  layers: MapLayer[]
+  zones: AmaPlace[]
+  tags: MapTag[]
+  occupancy: MapOccupancyCounts[]
+  flows: AmaFlow[]
+  moon: MapMoonState
+}
+
+export interface AmaFlow {
+  id: string
+  from_place_id: string
+  to_place_id: string
+  recorded_at: string
+  notes: string
+  distance_m: number | null
+  cycle_slot: AmaCycleSlot | null
+  display_slot?: AmaCycleSlot | null
+  created_at: string
+  from_name?: string
+  to_name?: string
+  from_lat?: number | null
+  from_lng?: number | null
+  to_lat?: number | null
+  to_lng?: number | null
+}
+
+export interface AmaLink {
+  id: string
+  object_type: AmaLinkObjectType
+  object_id: string
+  target_kind: AmaLinkTargetKind
+  target_id: string
+  role: string
+  created_at: string
+  target_label?: string
+}
+
+export interface AmaCycleState {
+  id: string
+  offset: number
+  hoy_started_at: string
+  slots: Array<{
+    id: AmaCycleSlot
+    label: string
+    operational: AmaCycleSlot
+  }>
+}
+
+export interface AmaOverview {
+  lists: number
+  tridentes: number
+  listas6: number
+  matrices6: number
+  matrices3: number
+  places: number
+  flows: number
+}
+
+export type AppRunStatus = 'current' | 'ended'
+
+export interface AppRun {
+  id: string
+  operator_id: string
+  operator_name: string
+  started_at: string
+  ended_at: string | null
+  status: AppRunStatus
+  backup_path?: string | null
+  created_at?: string
+  day_count: number
+}
+
+export type DeproDomainId =
+  | 'captura'
+  | 'criba'
+  | 'biblioteca'
+  | 'memoria'
+  | 'territorio'
+  | 'finanzas'
+  | 'derecho'
+  | 'vitalidad'
+
+export type DeproIpo = 'input' | 'procesamiento' | 'output'
+
+export type DeproCma = 'cuerpo' | 'mente' | 'alma'
+
+export type DeproTypology =
+  | 'vectorizador'
+  | 'clasificador'
+  | 'crawler'
+  | 'generativo'
+  | 'ejecutivo'
+  | 'omnivoro'
+
+export type DeproPowerStatus = 'hueco' | 'bosquejo' | 'cargado'
+
+export type DeproAgentStatus = 'hueco' | 'bosquejo' | 'vivo'
+
+export type DeproIdaStage = 'investigacion' | 'desarrollo' | 'aplicacion'
+
+export type DeproIdaOrigin = 'seed' | 'ui'
+
+export type DeproIdaKind = 'organismo' | 'aprendizaje'
+
+export type DeproIdaCardGrade = 'again' | 'good'
+
+export interface DeproContract {
+  input: string
+  processing: string
+  output: string
+}
+
+export interface DeproAmazonaCoords {
+  index: number
+  face: 0 | 1
+  cell: number
+  row: number
+  col: number
+  x: number
+  y: number
+  z: number
+  sum: number
+  product: number
+}
+
+export interface DeproPowerGeometry {
+  index: number
+  domain: DeproDomainId
+  domainIndex: number
+  oficioIndex: number
+  ipo: DeproIpo
+  cma: DeproCma
+  typology: DeproTypology
+  amazona: DeproAmazonaCoords
+}
+
+export interface DeproPower extends DeproPowerGeometry {
+  name: string
+  status: DeproPowerStatus
+  notes: string
+  contract: DeproContract
+  agentIds: string[]
+  operator_notes: string
+  status_override: DeproPowerStatus | null
+}
+
+export interface DeproPowerNote {
+  power_index: number
+  notes: string
+  status: DeproPowerStatus | null
+  updated_at: string
+}
+
+export interface DeproAgent {
+  id: string
+  name: string
+  typology: DeproTypology
+  contract: DeproContract
+  domains: DeproDomainId[]
+  powerIndexes: number[]
+  module: string | null
+  idaStage: DeproIdaStage
+  status: DeproAgentStatus
+  promptStub: string
+  notes: string
+}
+
+export interface DeproModule {
+  id: string
+  label: string
+  does: string
+  files: string
+  ipo: DeproContract
+  suggestedAgentIds: string[]
+}
+
+export interface DeproIdaItem {
+  id: string
+  title: string
+  body: string
+  stage: DeproIdaStage
+  power_indexes: number[]
+  agent_ids: string[]
+  tags: string[]
+  origin: DeproIdaOrigin
+  archived: number
+  matrix_id: string | null
+  row_item_id: string | null
+  col_item_id: string | null
+  weight: number | null
+  kind: DeproIdaKind
+  domain_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface DeproIdaCard {
+  id: string
+  ida_id: string
+  question: string
+  answer: string
+  due_at: string | null
+  ease: number
+  created_at: string
+  updated_at: string
+}
+
+export interface DeproIdaCardDue extends DeproIdaCard {
+  ida_title: string
+}
+
+export interface DeproIdaNeighbor {
+  object_type: 'ida_item' | 'quantomo'
+  object_id: string
+  score: number
+  title: string
+  body?: string
+  kind?: DeproIdaKind
+}
+
+export interface DeproIdaCardProposal {
+  question: string
+  answer: string
+}
+
+export type DeproResearchPackStatus =
+  | 'running'
+  | 'ready'
+  | 'error'
+  | 'closed'
+
+export type DeproResearchOrigin = 'manual' | 'api'
+
+export type DeproResearchFindingStatus =
+  | 'pending'
+  | 'assimilated'
+  | 'discarded'
+  | 'fractalized'
+
+export interface DeproResearchPack {
+  id: string
+  topic: string
+  agent_id: string
+  prompt_key: string
+  status: DeproResearchPackStatus
+  origin: DeproResearchOrigin
+  parent_finding_id: string | null
+  parent_pack_id: string | null
+  raw_content: string
+  raw_citations: unknown[]
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DeproResearchFinding {
+  id: string
+  pack_id: string
+  sort_index: number
+  axis_index: number | null
+  node_index: number | null
+  axis_title: string | null
+  title: string
+  body: string
+  url: string | null
+  status: DeproResearchFindingStatus
+  assimilated_ida_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type DialogoEntityRefType =
+  | 'person'
+  | 'project'
+  | 'agrupacion'
+  | 'quantomo'
+  | 'dominio'
+
+export interface DialogoEntityRef {
+  type: DialogoEntityRefType
+  id: string
+}
+
+export interface DialogoThread {
+  id: string
+  title: string
+  section_key: string | null
+  entity_refs: DialogoEntityRef[]
+  created_at: string
+  updated_at: string
+}
+
+export interface DialogoMessage {
+  id: string
+  thread_id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  created_at: string
+}
+
+export interface DashboardPin {
+  slot: number
+  ref_type: DialogoEntityRefType
+  ref_id: string
+  label: string
+  updated_at: string
 }

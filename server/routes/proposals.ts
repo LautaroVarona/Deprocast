@@ -2,7 +2,7 @@ import { Router } from 'express'
 import path from 'node:path'
 import { getDb } from '../db.js'
 import { row, rowRequired, rows } from '../sql.js'
-import type { Entry, PendingTask, ProposalBundle, Quantomo } from '../types.js'
+import type { Entry, EntryEntityRaw, PendingTask, ProposalBundle, Quantomo } from '../types.js'
 import { createEntityProposalsFromEntry } from '../services/entityMatch.js'
 import {
   embedApprovedEntry,
@@ -27,11 +27,15 @@ proposalsRouter.get('/pending', (_req, res) => {
   const getTasks = db.prepare(
     `SELECT * FROM pending_tasks WHERE entry_id = ? ORDER BY rowid ASC`,
   )
+  const getEntities = db.prepare(
+    `SELECT * FROM entry_entities_raw WHERE entry_id = ? ORDER BY rowid ASC`,
+  )
 
   const proposals: ProposalBundle[] = entries.map((entry) => ({
     ...entry,
     quantomos: rows<Quantomo>(getQuantomos.all(entry.id)),
     tasks: rows<PendingTask>(getTasks.all(entry.id)),
+    entities: rows<EntryEntityRaw>(getEntities.all(entry.id)),
   }))
 
   res.json({ proposals })
@@ -43,15 +47,19 @@ proposalsRouter.post('/approve', (req, res) => {
     title,
     rejectQuantomoIds = [],
     rejectTaskIds = [],
+    rejectEntityIds = [],
     quantomos,
     tasks,
+    entities,
   } = req.body as {
     entryId?: string
     title?: string
     rejectQuantomoIds?: string[]
     rejectTaskIds?: string[]
+    rejectEntityIds?: string[]
     quantomos?: Array<{ id: string; title: string; content: string }>
     tasks?: Array<{ id: string; task_text: string; tag: string }>
+    entities?: Array<{ id: string; name: string }>
   }
   if (!entryId) {
     res.status(400).json({ error: 'entryId requerido' })
@@ -96,6 +104,17 @@ proposalsRouter.post('/approve', (req, res) => {
       }
     }
 
+    if (Array.isArray(entities)) {
+      const updE = db.prepare(
+        `UPDATE entry_entities_raw SET name = ? WHERE id = ? AND entry_id = ?`,
+      )
+      for (const e of entities) {
+        const name = e.name?.trim()
+        if (!name) continue
+        updE.run(name, e.id, entryId)
+      }
+    }
+
     for (const qid of rejectQuantomoIds) {
       db.prepare(`DELETE FROM quantomos WHERE id = ? AND entry_id = ?`).run(
         qid,
@@ -107,6 +126,12 @@ proposalsRouter.post('/approve', (req, res) => {
       db.prepare(
         `UPDATE pending_tasks SET status = 'rejected' WHERE id = ? AND entry_id = ?`,
       ).run(tid, entryId)
+    }
+
+    for (const eid of rejectEntityIds) {
+      db.prepare(
+        `DELETE FROM entry_entities_raw WHERE id = ? AND entry_id = ?`,
+      ).run(eid, entryId)
     }
 
     db.prepare(`UPDATE entries SET status = 'approved' WHERE id = ?`).run(

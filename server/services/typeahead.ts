@@ -7,7 +7,13 @@ import { normalizeName } from './entityMatch.js'
 import { normalizePersonKind } from './personKinds.js'
 import { normalizeProjectKind } from './entityRelations.js'
 
-export type TypeaheadKind = 'person' | 'project' | 'quantomo' | 'agrupacion'
+export type TypeaheadKind =
+  | 'person'
+  | 'project'
+  | 'quantomo'
+  | 'agrupacion'
+  | 'dominio'
+  | 'geografia'
 
 export type TypeaheadHit = {
   kind: TypeaheadKind
@@ -367,6 +373,76 @@ function searchAgrupaciones(qNorm: string, limit: number): TypeaheadHit[] {
   return scored.sort((a, b) => b.score - a.score).slice(0, Math.max(limit, 8))
 }
 
+function searchDominios(qNorm: string, limit: number): TypeaheadHit[] {
+  const db = getDb()
+  const all = rows<{
+    id: string
+    name: string
+    notes: string | null
+    is_fixed: number
+  }>(
+    db
+      .prepare(`SELECT id, name, notes, is_fixed FROM dominios`)
+      .all(),
+  )
+
+  const scored: TypeaheadHit[] = []
+  for (const h of all) {
+    const tNorm = normalizeName(h.name)
+    const score = scoreAliasMatch(qNorm, tNorm)
+    if (score <= 0) continue
+    scored.push({
+      kind: 'dominio',
+      id: h.id,
+      label: h.name,
+      subtitle: h.is_fixed ? 'dominio fijo' : 'dominio',
+      aliases: [],
+      score: Math.round(score * 1000) / 1000,
+    })
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, Math.max(limit, 8))
+}
+
+function searchGeografia(qNorm: string, limit: number): TypeaheadHit[] {
+  const db = getDb()
+  const all = rows<{
+    id: string
+    name: string
+    kind: string
+    aliases: string | null
+  }>(
+    db
+      .prepare(
+        `SELECT id, name, kind, aliases FROM geografia
+         WHERE source = 'manual'
+           AND (merged_into IS NULL OR merged_into = '')
+           AND (status IS NULL OR status = 'active')`,
+      )
+      .all(),
+  )
+
+  const scored: TypeaheadHit[] = []
+  for (const h of all) {
+    const names = [h.name, ...parseAliasesJson(h.aliases)]
+    let best = 0
+    for (const n of names) {
+      best = Math.max(best, scoreAliasMatch(qNorm, normalizeName(n)))
+    }
+    if (best <= 0) continue
+    scored.push({
+      kind: 'geografia',
+      id: h.id,
+      label: h.name,
+      subtitle: h.kind || 'lugar',
+      aliases: parseAliasesJson(h.aliases),
+      score: Math.round(best * 1000) / 1000,
+    })
+  }
+
+  return scored.sort((a, b) => b.score - a.score).slice(0, Math.max(limit, 8))
+}
+
 export function typeaheadEntities(
   query: string,
   opts?: TypeaheadOptions,
@@ -397,6 +473,12 @@ export function typeaheadEntities(
   }
   if (kinds.includes('agrupacion')) {
     hits.push(...searchAgrupaciones(qNorm, perKind))
+  }
+  if (kinds.includes('dominio')) {
+    hits.push(...searchDominios(qNorm, perKind))
+  }
+  if (kinds.includes('geografia')) {
+    hits.push(...searchGeografia(qNorm, perKind))
   }
 
   return hits.sort((a, b) => b.score - a.score).slice(0, limit)
@@ -464,6 +546,57 @@ export function listRecentEntities(
     }
   }
 
+  if (kinds.includes('dominio')) {
+    const dominios = rows<{ id: string; name: string; is_fixed: number }>(
+      db
+        .prepare(
+          `SELECT id, name, is_fixed FROM dominios
+           ORDER BY is_fixed DESC, name COLLATE NOCASE ASC
+           LIMIT ?`,
+        )
+        .all(cap),
+    )
+    for (const d of dominios) {
+      hits.push({
+        kind: 'dominio',
+        id: d.id,
+        label: d.name,
+        subtitle: d.is_fixed ? 'dominio fijo' : 'dominio',
+        aliases: [],
+        score: 0.47,
+      })
+    }
+  }
+
+  if (kinds.includes('geografia')) {
+    const places = rows<{
+      id: string
+      name: string
+      kind: string
+      aliases: string | null
+    }>(
+      db
+        .prepare(
+          `SELECT id, name, kind, aliases FROM geografia
+           WHERE source = 'manual'
+             AND (merged_into IS NULL OR merged_into = '')
+           ORDER BY updated_at DESC
+           LIMIT ?`,
+        )
+        .all(cap),
+    )
+    for (const p of places) {
+      hits.push({
+        kind: 'geografia',
+        id: p.id,
+        label: p.name,
+        subtitle: p.kind || 'lugar',
+        aliases: parseAliasesJson(p.aliases),
+        score: 0.46,
+      })
+    }
+  }
+
   if (kinds.includes('project')) {
     const projects = rows<{
       id: string
@@ -519,6 +652,13 @@ export function getTypeaheadLabel(
     return (
       row<{ name: string }>(
         db.prepare(`SELECT name FROM agrupaciones WHERE id = ?`).get(id),
+      )?.name ?? null
+    )
+  }
+  if (kind === 'dominio') {
+    return (
+      row<{ name: string }>(
+        db.prepare(`SELECT name FROM dominios WHERE id = ?`).get(id),
       )?.name ?? null
     )
   }

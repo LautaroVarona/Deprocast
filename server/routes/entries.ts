@@ -7,6 +7,7 @@ import { removeFromPipelineQueue, enqueuePipeline } from '../services/pipeline.j
 import { listBlobs } from '../services/blobIngest.js'
 import type {
   Entry,
+  EntryEntityRaw,
   PendingTask,
   ProposalBundle,
   Quantomo,
@@ -16,6 +17,83 @@ import type {
 import { parseManualTags } from '../services/bookmarkProcess.js'
 
 export const entriesRouter = Router()
+
+type CribaBody = {
+  content_raw?: unknown
+  operator_note?: unknown
+  manual_tags?: unknown
+  speaker_map?: unknown
+  title?: unknown
+  timestamp_exact?: unknown
+}
+
+function parseSpeakerMapBody(raw: unknown, fallback: string): string {
+  if (!Array.isArray(raw)) return fallback
+  const mapped: SpeakerAssignment[] = raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null
+      const o = item as Record<string, unknown>
+      const speaker = Number(o.speaker)
+      if (!Number.isFinite(speaker)) return null
+      return {
+        speaker,
+        person_id:
+          typeof o.person_id === 'string' && o.person_id.trim()
+            ? o.person_id.trim()
+            : null,
+        person_name:
+          typeof o.person_name === 'string' && o.person_name.trim()
+            ? o.person_name.trim()
+            : null,
+      }
+    })
+    .filter((s): s is SpeakerAssignment => s != null)
+  return JSON.stringify(mapped)
+}
+
+function cribaFieldUpdates(entry: Entry, body: CribaBody) {
+  const content_raw =
+    typeof body.content_raw === 'string' ? body.content_raw : entry.content_raw
+  const operator_note =
+    typeof body.operator_note === 'string'
+      ? body.operator_note
+      : (entry.operator_note ?? '')
+  let manual_tags = entry.manual_tags ?? '[]'
+  if (Array.isArray(body.manual_tags)) {
+    manual_tags = JSON.stringify(
+      parseManualTags(JSON.stringify(body.manual_tags)),
+    )
+  }
+  const speaker_map = parseSpeakerMapBody(
+    body.speaker_map,
+    entry.speaker_map ?? '[]',
+  )
+  let title = entry.title
+  let title_manual = entry.title_manual ?? 0
+  if (typeof body.title === 'string' && body.title.trim()) {
+    const trimmed = body.title.trim()
+    if (trimmed !== entry.title) {
+      title = trimmed
+      title_manual = 1
+    }
+  }
+  let timestamp_exact = entry.timestamp_exact
+  if (typeof body.timestamp_exact === 'string' && body.timestamp_exact.trim()) {
+    const d = new Date(body.timestamp_exact)
+    if (!Number.isNaN(d.getTime())) {
+      timestamp_exact = d.toISOString()
+    }
+  }
+  return {
+    content_raw,
+    operator_note,
+    manual_tags,
+    speaker_map,
+    title,
+    title_manual,
+    timestamp_exact,
+  }
+}
 
 function bundleEntry(entry: Entry, withFileMetadata = false): ProposalBundle {
   const db = getDb()
@@ -33,8 +111,15 @@ function bundleEntry(entry: Entry, withFileMetadata = false): ProposalBundle {
       )
       .all(entry.id),
   )
+  const entities = rows<EntryEntityRaw>(
+    db
+      .prepare(
+        `SELECT * FROM entry_entities_raw WHERE entry_id = ? ORDER BY rowid ASC`,
+      )
+      .all(entry.id),
+  )
 
-  const bundle: ProposalBundle = { ...entry, quantomos, tasks }
+  const bundle: ProposalBundle = { ...entry, quantomos, tasks, entities }
 
   if (withFileMetadata) {
     const meta = row<ValidatedFileMetadata>(
@@ -249,54 +334,23 @@ entriesRouter.patch('/:entryId/criba', (req, res) => {
     return
   }
 
-  const body = req.body as {
-    content_raw?: unknown
-    operator_note?: unknown
-    manual_tags?: unknown
-    speaker_map?: unknown
-  }
-
-  const nextTranscript =
-    typeof body.content_raw === 'string' ? body.content_raw : entry.content_raw
-  const nextNote =
-    typeof body.operator_note === 'string'
-      ? body.operator_note
-      : (entry.operator_note ?? '')
-  let nextTags = entry.manual_tags ?? '[]'
-  if (body.manual_tags != null) {
-    nextTags = JSON.stringify(parseManualTags(JSON.stringify(body.manual_tags)))
-    if (Array.isArray(body.manual_tags)) {
-      nextTags = JSON.stringify(parseManualTags(JSON.stringify(body.manual_tags)))
-    }
-  }
-  let nextSpeakers = entry.speaker_map ?? '[]'
-  if (Array.isArray(body.speaker_map)) {
-    const mapped: SpeakerAssignment[] = body.speaker_map
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-        const o = item as Record<string, unknown>
-        const speaker = Number(o.speaker)
-        if (!Number.isFinite(speaker)) return null
-        return {
-          speaker,
-          person_id:
-            typeof o.person_id === 'string' && o.person_id.trim()
-              ? o.person_id.trim()
-              : null,
-          person_name:
-            typeof o.person_name === 'string' && o.person_name.trim()
-              ? o.person_name.trim()
-              : null,
-        }
-      })
-      .filter((s): s is SpeakerAssignment => s != null)
-    nextSpeakers = JSON.stringify(mapped)
-  }
+  const next = cribaFieldUpdates(entry, req.body as CribaBody)
 
   db.prepare(
-    `UPDATE entries SET content_raw = ?, operator_note = ?, manual_tags = ?, speaker_map = ?
+    `UPDATE entries SET
+       content_raw = ?, operator_note = ?, manual_tags = ?, speaker_map = ?,
+       title = ?, title_manual = ?, timestamp_exact = ?
      WHERE id = ?`,
-  ).run(nextTranscript, nextNote, nextTags, nextSpeakers, entryId)
+  ).run(
+    next.content_raw,
+    next.operator_note,
+    next.manual_tags,
+    next.speaker_map,
+    next.title,
+    next.title_manual,
+    next.timestamp_exact,
+    entryId,
+  )
 
   const updated = rowRequired<Entry>(
     db.prepare(`SELECT * FROM entries WHERE id = ?`).get(entryId),
@@ -324,40 +378,23 @@ entriesRouter.post('/:entryId/weight', async (req, res) => {
     return
   }
 
-  const body = req.body as {
-    content_raw?: unknown
-    operator_note?: unknown
-    manual_tags?: unknown
-    speaker_map?: unknown
-  }
-  const nextTranscript =
-    typeof body.content_raw === 'string' ? body.content_raw : entry.content_raw
-  const nextNote =
-    typeof body.operator_note === 'string'
-      ? body.operator_note
-      : (entry.operator_note ?? '')
-  let nextTags = entry.manual_tags ?? '[]'
-  if (Array.isArray(body.manual_tags)) {
-    nextTags = JSON.stringify(
-      parseManualTags(JSON.stringify(body.manual_tags)),
-    )
-  }
-  let nextSpeakers = entry.speaker_map ?? '[]'
-  if (Array.isArray(body.speaker_map)) {
-    nextSpeakers = JSON.stringify(body.speaker_map)
-  }
+  const next = cribaFieldUpdates(entry, req.body as CribaBody)
 
   db.prepare(
     `UPDATE entries SET
        human_weight = ?, status = 'pending_extract',
-       content_raw = ?, operator_note = ?, manual_tags = ?, speaker_map = ?
+       content_raw = ?, operator_note = ?, manual_tags = ?, speaker_map = ?,
+       title = ?, title_manual = ?, timestamp_exact = ?
      WHERE id = ?`,
   ).run(
     Math.round(weight),
-    nextTranscript,
-    nextNote,
-    nextTags,
-    nextSpeakers,
+    next.content_raw,
+    next.operator_note,
+    next.manual_tags,
+    next.speaker_map,
+    next.title,
+    next.title_manual,
+    next.timestamp_exact,
     entryId,
   )
 

@@ -223,6 +223,9 @@ export function deleteNotebook(
       database.prepare(`DELETE FROM entries WHERE id = ?`).run(entryId)
     }
     database.prepare(`DELETE FROM pages WHERE notebook_id = ?`).run(notebookId)
+    database
+      .prepare(`DELETE FROM notebook_sources WHERE notebook_id = ?`)
+      .run(notebookId)
     database.prepare(`DELETE FROM notebooks WHERE id = ?`).run(notebookId)
     database.exec('COMMIT')
   } catch (err) {

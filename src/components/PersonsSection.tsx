@@ -36,7 +36,18 @@ const KIND_LABEL: Record<string, string> = {
   ficticia: 'Ficticia',
   abstracta: 'Abstracta',
   ruido: 'Ruido',
+  geografia: 'Geografía',
   agrupacion: 'Ficticia',
+  proyecto: 'Proyecto',
+  tarea: 'Tarea',
+  concepto: 'Concepto',
+  lugar: 'Lugar',
+  calle: 'Calle',
+  ciudad: 'Ciudad',
+  barrio: 'Barrio',
+  region: 'Región',
+  pais: 'País',
+  otro: 'Otro',
 }
 
 const RELATION_LABEL: Record<PersonRelationType, string> = {
@@ -62,10 +73,20 @@ const PROJECT_KIND_LABEL: Record<ProjectKind, string> = {
 }
 
 function normalizeKind(k: unknown): PersonKind {
-  const s = String(k ?? 'fisica').toLowerCase()
+  const s = String(k ?? 'fisica')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
   if (s === 'agrupacion' || s === 'ficticio') return 'ficticia'
   if (
-    ['fisica', 'juridica', 'ficticia', 'abstracta', 'ruido'].includes(s)
+    [
+      'fisica',
+      'juridica',
+      'ficticia',
+      'abstracta',
+      'ruido',
+      'geografia',
+    ].includes(s)
   ) {
     return s as PersonKind
   }
@@ -79,6 +100,27 @@ function initials(name: string): string {
   return `${parts[0]![0] ?? ''}${parts[1]![0] ?? ''}`.toUpperCase()
 }
 
+type WaitingGeneralItem = {
+  id: string
+  entity_type: 'person' | 'project' | 'geografia'
+  name: string
+  class_label: string
+  notes: string | null
+  created_at: string
+  suggested_match: {
+    id: string
+    name: string
+    score: number
+    target_type: 'person' | 'project' | 'geografia'
+  } | null
+  cross_match: {
+    id: string
+    name: string
+    score: number
+    target_type: 'person' | 'project' | 'geografia'
+  } | null
+}
+
 export function PersonsSection({
   refreshKey,
   onChanged,
@@ -87,6 +129,16 @@ export function PersonsSection({
 }: Props) {
   const [profiles, setProfiles] = useState<Person[]>([])
   const [waiting, setWaiting] = useState<Person[]>([])
+  const [generalWaiting, setGeneralWaiting] = useState<WaitingGeneralItem[]>([])
+  const [waitingProjectMasters, setWaitingProjectMasters] = useState<
+    Array<{ id: string; name: string; category: string }>
+  >([])
+  const [waitingGeoMasters, setWaitingGeoMasters] = useState<
+    Array<{ id: string; name: string; kind: string }>
+  >([])
+  const [waitingDest, setWaitingDest] = useState<
+    Record<string, 'person' | 'project' | 'geografia'>
+  >({})
   const [proposals, setProposals] = useState<EntityProposalView[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [links, setLinks] = useState<EntityLink[]>([])
@@ -173,17 +225,34 @@ export function PersonsSection({
     if (!quiet) setLoading(true)
     if (!quiet) setError(null)
     try {
-      const [roster, pending, projectsMap, agrupRoster] = await Promise.all([
-        api.listPersons(),
-        api.getPendingPersons(),
-        api.listProjects(),
-        api.listAgrupaciones(),
-      ])
+      const [roster, pending, projectsMap, agrupRoster, waitingRes] =
+        await Promise.all([
+          api.listPersons(),
+          api.getPendingPersons(),
+          api.listProjects(),
+          api.listAgrupaciones(),
+          api.listWaiting(),
+        ])
       if (gen !== loadGenRef.current) return
 
       const nextProfiles = roster.profiles ?? roster.persons ?? []
       setProfiles(nextProfiles)
       setWaiting(roster.waiting ?? [])
+      setGeneralWaiting(waitingRes.items ?? [])
+      setWaitingProjectMasters(waitingRes.masters?.projects ?? [])
+      setWaitingGeoMasters(waitingRes.masters?.geografia ?? [])
+      setWaitingDest((prev) => {
+        const next = { ...prev }
+        for (const item of waitingRes.items ?? []) {
+          if (next[item.id] !== undefined) continue
+          const prefer =
+            item.suggested_match?.target_type ??
+            item.cross_match?.target_type ??
+            item.entity_type
+          next[item.id] = prefer
+        }
+        return next
+      })
       setOperatorId(roster.operator_id ?? null)
       setAllProjects(projectsMap.projects)
       // No pisar menciones que el usuario ya resolvió y siguen in-flight
@@ -292,8 +361,9 @@ export function PersonsSection({
   )
 
   const matchedWaiting = useMemo(
-    () => waiting.filter((w) => w.suggested_match),
-    [waiting],
+    () =>
+      generalWaiting.filter((w) => w.suggested_match || w.cross_match),
+    [generalWaiting],
   )
 
   const filteredProfiles = useMemo(() => {
@@ -363,9 +433,9 @@ export function PersonsSection({
 
   // Limpia selección si salen de la sala
   useEffect(() => {
-    const alive = new Set(waiting.map((w) => w.id))
+    const alive = new Set(generalWaiting.map((w) => w.id))
     setSelectedWaitingIds((prev) => prev.filter((id) => alive.has(id)))
-  }, [waiting])
+  }, [generalWaiting])
 
   const selectProfile = async (id: string) => {
     setSelectedId(id)
@@ -420,7 +490,10 @@ export function PersonsSection({
     setProjectLinks([])
     setPersonAgrupaciones([])
     setFormName(w.name)
-    setFormKind(normalizeKind(w.kind))
+    const k = normalizeKind(w.kind)
+    setFormKind(
+      k === 'fisica' || k === 'juridica' || k === 'ficticia' ? k : 'fisica',
+    )
     setFormAliases((w.aliases_list ?? []).join(', '))
     setFormNotes(w.notes ?? '')
     setInspectorOpen(true)
@@ -531,12 +604,63 @@ export function PersonsSection({
     }
   }
 
+  const handleAssignWaitingToAgrupacion = async (
+    waitingIds: string | string[],
+    agrupacionId: string,
+  ) => {
+    const ids = Array.isArray(waitingIds) ? waitingIds : [waitingIds]
+    if (ids.length === 0 || !agrupacionId) return
+    const agrup = agrupaciones.find((a) => a.id === agrupacionId)
+    setBusyId(ids[0] ?? null)
+    let ok = 0
+    try {
+      for (const pid of ids) {
+        try {
+          await api.addAgrupacionMember(agrupacionId, pid)
+          ok += 1
+        } catch {
+          /* duplicado u otro conflicto: se omite */
+        }
+      }
+      setSelectedWaitingIds((prev) => prev.filter((id) => !ids.includes(id)))
+      if (ok > 0) {
+        setWaiting((prev) => prev.filter((w) => !ids.includes(w.id)))
+      }
+      if (
+        agrupacionEditingId === agrupacionId ||
+        selectedAgrupacionId === agrupacionId
+      ) {
+        await selectAgrupacion(agrupacionId)
+      }
+      onChanged?.()
+      await load()
+      if (ok === 0) {
+        setError('No se pudo añadir a la agrupación')
+      } else {
+        setStatus(
+          agrup
+            ? ok === 1
+              ? `Añadido a «${agrup.name}»`
+              : `Añadidos ${ok} a «${agrup.name}»`
+            : `Añadidos ${ok}`,
+        )
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al vincular')
+    } finally {
+      setBusyId(null)
+      setDragWaitingIds([])
+      setDropTargetId(null)
+    }
+  }
+
   const handleAddAgrupacionMember = async (personId?: string) => {
     const id = personId || agrupMemberPick
     if (!agrupacionEditingId || !id) return
     try {
       await api.addAgrupacionMember(agrupacionEditingId, id)
       setAgrupMemberPick('')
+      setWaiting((prev) => prev.filter((w) => w.id !== id))
       setStatus('Miembro añadido')
       await selectAgrupacion(agrupacionEditingId)
       onChanged?.()
@@ -714,21 +838,44 @@ export function PersonsSection({
     }
   }
 
-  const handleAttach = async (waitingIds: string | string[], masterId: string) => {
+  const handleAttach = async (
+    waitingIds: string | string[],
+    masterId: string,
+    toType: 'person' | 'project' | 'geografia' = 'person',
+  ) => {
     const ids = Array.isArray(waitingIds) ? waitingIds : [waitingIds]
     if (ids.length === 0) return
-    const master = profiles.find((p) => p.id === masterId)
+    const masterName =
+      toType === 'person'
+        ? profiles.find((p) => p.id === masterId)?.name
+        : toType === 'project'
+          ? waitingProjectMasters.find((p) => p.id === masterId)?.name ||
+            allProjects.find((p) => p.id === masterId)?.title
+          : waitingGeoMasters.find((p) => p.id === masterId)?.name
     setBusyId(ids[0] ?? null)
     let ok = 0
     const aliases: string[] = []
     try {
       for (const waitingId of ids) {
-        const waitingEntity = waiting.find((p) => p.id === waitingId)
+        const item =
+          generalWaiting.find((p) => p.id === waitingId) ||
+          (waiting.find((p) => p.id === waitingId)
+            ? {
+                id: waitingId,
+                entity_type: 'person' as const,
+                name: waiting.find((p) => p.id === waitingId)!.name,
+              }
+            : null)
+        if (!item) continue
         try {
-          const res = await api.attachWaitingToProfile(waitingId, masterId)
+          const res = await api.resolveWaiting(waitingId, {
+            from_type: item.entity_type,
+            action: 'attach',
+            to_type: toType,
+            target_id: masterId,
+          })
           ok += 1
-          const added =
-            res.alias_added?.trim() || waitingEntity?.name?.trim() || null
+          const added = res.alias_added?.trim() || item.name?.trim() || null
           if (added) aliases.push(added)
         } catch {
           /* cuenta fallos abajo */
@@ -738,7 +885,10 @@ export function PersonsSection({
       await load()
       onChanged?.()
 
-      if (selectedId === masterId || editingId === masterId) {
+      if (
+        toType === 'person' &&
+        (selectedId === masterId || editingId === masterId)
+      ) {
         try {
           const data = await api.getPerson(masterId)
           setLinks(data.links)
@@ -751,7 +901,6 @@ export function PersonsSection({
         }
       }
 
-      const masterName = master?.name
       if (ok === 0) {
         setError('No se pudo vincular ninguna entidad')
       } else if (ok === 1 && aliases[0] && masterName) {
@@ -773,6 +922,56 @@ export function PersonsSection({
       setBusyId(null)
       setDragWaitingIds([])
       setDropTargetId(null)
+    }
+  }
+
+  const handlePromoteWaiting = async (
+    item: WaitingGeneralItem,
+    toType: 'person' | 'project' | 'geografia',
+  ) => {
+    setBusyId(item.id)
+    try {
+      if (toType === 'person') {
+        const personRow = waiting.find((p) => p.id === item.id)
+        if (personRow) {
+          openPromote(personRow)
+          return
+        }
+        await api.resolveWaiting(item.id, {
+          from_type: item.entity_type,
+          action: 'promote',
+          to_type: 'person',
+          name: item.name,
+          kind: 'fisica',
+        })
+        setStatus(`«${item.name}» → perfil nuevo`)
+      } else if (toType === 'project') {
+        await api.resolveWaiting(item.id, {
+          from_type: item.entity_type,
+          action: 'promote',
+          to_type: 'project',
+          title: item.name,
+          category: 'proyecto',
+          status: 'emergente',
+        })
+        setStatus(`«${item.name}» → proyecto nuevo`)
+      } else {
+        await api.resolveWaiting(item.id, {
+          from_type: item.entity_type,
+          action: 'promote',
+          to_type: 'geografia',
+          name: item.name,
+          kind: 'lugar',
+        })
+        setStatus(`«${item.name}» → lugar nuevo`)
+      }
+      setSelectedWaitingIds((ids) => ids.filter((x) => x !== item.id))
+      await load()
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al promover')
+    } finally {
+      setBusyId(null)
     }
   }
 
@@ -1026,29 +1225,13 @@ export function PersonsSection({
                   draftKinds[p.id] ?? normalizeKind(p.meta.kind)
                 const match = p.suggested_match
                 const isNoise = kind === 'ruido' || kind === 'abstracta'
+                const isGeo = kind === 'geografia'
                 const busy = busyId === p.id
                 return (
                   <li key={p.id} className="proposal-card">
-                    <div className="proposal-card-head">
-                      <span
-                        className={
-                          match
-                            ? 'badge badge-link'
-                            : isNoise
-                              ? 'badge badge-noise'
-                              : 'badge badge-new'
-                        }
-                      >
-                        {isNoise
-                          ? KIND_LABEL[kind]
-                          : match
-                            ? 'Posible vínculo'
-                            : 'Mención'}
-                      </span>
-                    </div>
-                    <label className="field">
-                      <span className="mono">Mención</span>
+                    <label className="field proposal-mention-field">
                       <input
+                        className="proposal-mention-input"
                         value={draftNames[p.id] ?? p.suggested_name}
                         onChange={(e) =>
                           setDraftNames((d) => ({
@@ -1056,8 +1239,28 @@ export function PersonsSection({
                             [p.id]: e.target.value,
                           }))
                         }
+                        aria-label="Mención"
                       />
                     </label>
+                    <div className="proposal-card-head">
+                      <span
+                        className={
+                          match
+                            ? 'badge badge-link'
+                            : isNoise
+                              ? 'badge badge-noise'
+                              : isGeo
+                                ? 'badge badge-new'
+                                : 'badge badge-new'
+                        }
+                      >
+                        {isNoise || isGeo
+                          ? KIND_LABEL[kind]
+                          : match
+                            ? 'Posible vínculo'
+                            : 'Mención'}
+                      </span>
+                    </div>
                     <label className="field">
                       <span className="mono">Clasificar</span>
                       <select
@@ -1072,6 +1275,7 @@ export function PersonsSection({
                         <option value="fisica">Física</option>
                         <option value="juridica">Jurídica</option>
                         <option value="ficticia">Ficticia</option>
+                        <option value="geografia">Geografía</option>
                         <option value="abstracta">Abstracta</option>
                         <option value="ruido">Ruido</option>
                       </select>
@@ -1664,26 +1868,18 @@ export function PersonsSection({
                       const raw = e.dataTransfer.getData('text/waiting-ids')
                       if (raw) ids = JSON.parse(raw) as string[]
                     } catch {
-                      /* ignore */
+                      ids = []
+                    }
+                    if (ids.length === 0) {
+                      const one =
+                        e.dataTransfer.getData('text/waiting-id') ||
+                        dragWaitingIds[0]
+                      if (one) ids = [one]
                     }
                     setDropTargetId(null)
                     setDragWaitingIds([])
                     if (ids.length === 0) return
-                    void (async () => {
-                      for (const pid of ids) {
-                        try {
-                          await api.addAgrupacionMember(a.id, pid)
-                        } catch {
-                          /* skip duplicates */
-                        }
-                      }
-                      setStatus(
-                        `Añadidos ${ids.length} a «${a.name}»`,
-                      )
-                      await selectAgrupacion(a.id)
-                      onChanged?.()
-                      await load()
-                    })()
+                    void handleAssignWaitingToAgrupacion(ids, a.id)
                   }}
                 >
                   <span className="profile-card-avatar" aria-hidden>
@@ -1904,8 +2100,8 @@ export function PersonsSection({
             <div>
               <h2>Sala de espera</h2>
               <p className="muted mono">
-                Entidades validadas sin perfil
-                {waiting.length > 0 ? ` · ${waiting.length}` : ''}
+                General · corpus sin ficha maestra
+                {generalWaiting.length > 0 ? ` · ${generalWaiting.length}` : ''}
                 {matchedWaiting.length > 0
                   ? ` · ${matchedWaiting.length} sugeridas`
                   : ''}
@@ -1936,7 +2132,7 @@ export function PersonsSection({
 
           {waitingOpen && (
             <>
-              {waiting.length === 0 ? (
+              {generalWaiting.length === 0 ? (
                 <p className="muted mono">
                   Vacía · las menciones aprobadas llegan acá
                 </p>
@@ -1945,11 +2141,23 @@ export function PersonsSection({
                   <p className="muted mono waiting-hint-line">
                     {personasMode === 'agrupaciones'
                       ? 'Ctrl+clic para multiselección · arrastrá a una agrupación'
-                      : 'Ctrl+clic para multiselección · arrastrá al perfil'}
+                      : 'Ctrl+clic · elegí destino (perfil o proyecto) · arrastrá al perfil'}
                   </p>
                   <ul className="waiting-pill-list">
-                    {waiting.map((w) => {
-                      const match = w.suggested_match
+                    {generalWaiting.map((w) => {
+                      const dest =
+                        waitingDest[w.id] ??
+                        w.suggested_match?.target_type ??
+                        w.entity_type
+                      const matchFor = (
+                        t: 'person' | 'project' | 'geografia',
+                      ) =>
+                        w.suggested_match?.target_type === t
+                          ? w.suggested_match
+                          : w.cross_match?.target_type === t
+                            ? w.cross_match
+                            : null
+                      const match = matchFor(dest)
                       const busy =
                         busyId === w.id ||
                         (busyId !== null && selectedWaitingIds.includes(w.id))
@@ -1957,7 +2165,7 @@ export function PersonsSection({
                       const dragging = dragWaitingIds.includes(w.id)
                       return (
                         <li
-                          key={w.id}
+                          key={`${w.entity_type}:${w.id}`}
                           className={[
                             'waiting-pill',
                             selected ? 'is-selected' : '',
@@ -1965,9 +2173,8 @@ export function PersonsSection({
                           ]
                             .filter(Boolean)
                             .join(' ')}
-                          draggable={!busy}
+                          draggable={!busy && dest === 'person'}
                           onClick={(e) => {
-                            // no interferir con controles internos
                             const t = e.target as HTMLElement
                             if (
                               t.closest('button, select, input, .waiting-hint')
@@ -1981,6 +2188,7 @@ export function PersonsSection({
                             )
                           }}
                           onDragStart={(e) => {
+                            if (dest !== 'person') return
                             const bundle =
                               selectedWaitingIds.includes(w.id) &&
                               selectedWaitingIds.length > 0
@@ -2014,74 +2222,222 @@ export function PersonsSection({
                               )}
                               {w.name}
                             </span>
-                            <span className="waiting-hint">
-                              <span className="waiting-hint-mark" aria-hidden>
-                                ?
-                              </span>
-                              <span className="waiting-hint-pop" role="tooltip">
-                                {w.source_file && (
-                                  <span className="waiting-hint-file mono">
-                                    {w.source_file}
-                                  </span>
-                                )}
-                                <span className="waiting-hint-snip">
-                                  {w.evidence_snippet
-                                    ? `“${w.evidence_snippet}”`
-                                    : 'Sin fragmento de mención disponible'}
-                                </span>
-                              </span>
+                            <span className="badge badge-new waiting-type-badge">
+                              {w.entity_type === 'project'
+                                ? 'Proy.'
+                                : w.entity_type === 'geografia'
+                                  ? 'Geo.'
+                                  : 'Pers.'}
+                              {' · '}
+                              {KIND_LABEL[w.class_label] ?? w.class_label}
                             </span>
                           </div>
 
                           <div className="waiting-pill-actions">
-                            {profiles.length > 0 ? (
-                              <select
-                                className="waiting-link-select"
-                                defaultValue={match?.id ?? ''}
-                                disabled={busy}
-                                aria-label="Vincular a perfil"
-                                onPointerDown={(e) => e.stopPropagation()}
-                                onClick={(e) => e.stopPropagation()}
-                                onChange={(e) => {
-                                  const id = e.target.value
-                                  if (id) {
-                                    const bundle =
-                                      selectedWaitingIds.includes(w.id) &&
-                                      selectedWaitingIds.length > 1
-                                        ? selectedWaitingIds
-                                        : [w.id]
-                                    void handleAttach(bundle, id)
-                                  }
-                                  e.target.value = match?.id ?? ''
-                                }}
-                              >
-                                <option value="">— vincular a… —</option>
-                                {profiles.map((p) => (
-                                  <option key={p.id} value={p.id}>
-                                    {p.name}
-                                    {match?.id === p.id
-                                      ? ` · ${Math.round(match.score * 100)}%`
-                                      : ''}
-                                  </option>
-                                ))}
-                              </select>
+                            {personasMode === 'agrupaciones' ? (
+                              w.entity_type === 'person' &&
+                              agrupaciones.length > 0 ? (
+                                <select
+                                  className="waiting-link-select"
+                                  defaultValue=""
+                                  disabled={busy}
+                                  aria-label="Asignar a agrupación"
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    const id = e.target.value
+                                    if (id) {
+                                      const bundle =
+                                        selectedWaitingIds.includes(w.id) &&
+                                        selectedWaitingIds.length > 1
+                                          ? selectedWaitingIds
+                                          : [w.id]
+                                      void handleAssignWaitingToAgrupacion(
+                                        bundle,
+                                        id,
+                                      )
+                                    }
+                                    e.target.value = ''
+                                  }}
+                                >
+                                  <option value="">— asignar a… —</option>
+                                  {agrupaciones.map((a) => (
+                                    <option key={a.id} value={a.id}>
+                                      {a.name}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <span className="waiting-link-placeholder muted mono">
+                                  {w.entity_type === 'project'
+                                    ? 'Solo personas → agrupación'
+                                    : 'Sin agrupaciones'}
+                                </span>
+                              )
                             ) : (
-                              <span className="waiting-link-placeholder muted mono">
-                                Sin perfiles
-                              </span>
+                              <>
+                                <select
+                                  className="waiting-link-select"
+                                  value={dest}
+                                  disabled={busy}
+                                  aria-label="Destino"
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    const v = e.target.value as
+                                      | 'person'
+                                      | 'project'
+                                      | 'geografia'
+                                    setWaitingDest((d) => ({
+                                      ...d,
+                                      [w.id]: v,
+                                    }))
+                                  }}
+                                >
+                                  <option value="person">→ Perfil</option>
+                                  <option value="project">→ Proyecto</option>
+                                  <option value="geografia">→ Geografía</option>
+                                </select>
+                                {dest === 'person' ? (
+                                  profiles.length > 0 ? (
+                                    <select
+                                      className="waiting-link-select"
+                                      defaultValue={match?.id ?? ''}
+                                      disabled={busy}
+                                      aria-label="Vincular a perfil"
+                                      onPointerDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => {
+                                        const id = e.target.value
+                                        if (id) {
+                                          const bundle =
+                                            selectedWaitingIds.includes(w.id) &&
+                                            selectedWaitingIds.length > 1
+                                              ? selectedWaitingIds
+                                              : [w.id]
+                                          void handleAttach(
+                                            bundle,
+                                            id,
+                                            'person',
+                                          )
+                                        }
+                                        e.target.value = match?.id ?? ''
+                                      }}
+                                    >
+                                      <option value="">— vincular a… —</option>
+                                      {profiles.map((p) => (
+                                        <option key={p.id} value={p.id}>
+                                          {p.name}
+                                          {match?.id === p.id
+                                            ? ` · ${Math.round(match.score * 100)}%`
+                                            : ''}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <span className="waiting-link-placeholder muted mono">
+                                      Sin perfiles
+                                    </span>
+                                  )
+                                ) : dest === 'project' ? (
+                                  waitingProjectMasters.length > 0 ? (
+                                    <select
+                                      className="waiting-link-select"
+                                      defaultValue={match?.id ?? ''}
+                                      disabled={busy}
+                                      aria-label="Vincular a proyecto"
+                                      onPointerDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => {
+                                        const id = e.target.value
+                                        if (id) {
+                                          const bundle =
+                                            selectedWaitingIds.includes(w.id) &&
+                                            selectedWaitingIds.length > 1
+                                              ? selectedWaitingIds
+                                              : [w.id]
+                                          void handleAttach(
+                                            bundle,
+                                            id,
+                                            'project',
+                                          )
+                                        }
+                                        e.target.value = match?.id ?? ''
+                                      }}
+                                    >
+                                      <option value="">— vincular a… —</option>
+                                      {waitingProjectMasters.map((p) => (
+                                        <option key={p.id} value={p.id}>
+                                          {p.name}
+                                          {match?.id === p.id
+                                            ? ` · ${Math.round(match.score * 100)}%`
+                                            : ''}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : (
+                                    <span className="waiting-link-placeholder muted mono">
+                                      Sin proyectos maestro
+                                    </span>
+                                  )
+                                ) : waitingGeoMasters.length > 0 ? (
+                                  <select
+                                    className="waiting-link-select"
+                                    defaultValue={match?.id ?? ''}
+                                    disabled={busy}
+                                    aria-label="Vincular a lugar"
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      const id = e.target.value
+                                      if (id) {
+                                        const bundle =
+                                          selectedWaitingIds.includes(w.id) &&
+                                          selectedWaitingIds.length > 1
+                                            ? selectedWaitingIds
+                                            : [w.id]
+                                        void handleAttach(
+                                          bundle,
+                                          id,
+                                          'geografia',
+                                        )
+                                      }
+                                      e.target.value = match?.id ?? ''
+                                    }}
+                                  >
+                                    <option value="">— vincular a… —</option>
+                                    {waitingGeoMasters.map((p) => (
+                                      <option key={p.id} value={p.id}>
+                                        {p.name}
+                                        {match?.id === p.id
+                                          ? ` · ${Math.round(match.score * 100)}%`
+                                          : ''}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <span className="waiting-link-placeholder muted mono">
+                                    Sin lugares maestro
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className="btn btn-tiny btn-promote"
+                                  disabled={busy}
+                                  onPointerDown={(e) => e.stopPropagation()}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    void handlePromoteWaiting(w, dest)
+                                  }}
+                                >
+                                  {dest === 'person'
+                                    ? 'Promover a perfil nuevo'
+                                    : dest === 'project'
+                                      ? 'Promover a proyecto nuevo'
+                                      : 'Promover a lugar nuevo'}
+                                </button>
+                              </>
                             )}
-                            <button
-                              type="button"
-                              className="btn btn-tiny btn-promote"
-                              disabled={busy}
-                              onPointerDown={(e) => e.stopPropagation()}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                openPromote(w)
-                              }}
-                            >
-                              Promover a perfil nuevo
-                            </button>
                           </div>
                         </li>
                       )
@@ -2119,6 +2475,7 @@ export function PersonsSection({
           { value: 'fisica', label: 'Física' },
           { value: 'juridica', label: 'Jurídica' },
           { value: 'ficticia', label: 'Ficticia' },
+          { value: 'geografia', label: 'Geografía' },
           { value: 'abstracta', label: 'Abstracta' },
           { value: 'ruido', label: 'Ruido' },
         ]}

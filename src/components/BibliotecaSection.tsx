@@ -7,11 +7,13 @@ import type {
   NotebookPage,
   NotebookProcessLog,
   NotebookQueueStatus,
+  NotebookSource,
 } from '../types'
 import { PageValidationPanel } from './PageValidationPanel'
+import { ExplanationValidationPanel } from './ExplanationValidationPanel'
 import { DigitalPageEditor } from './DigitalPageEditor'
 
-type Mode = 'list' | 'reader' | 'validate' | 'digital'
+type Mode = 'list' | 'reader' | 'validate' | 'explain-validate' | 'digital'
 
 const TOTAL_FACES = 160
 const SPREAD_MAX = 81
@@ -55,6 +57,60 @@ function statusClass(status: string): string {
   return `nb-status nb-status-${status.toLowerCase()}`
 }
 
+const SOURCE_ACCEPT = [
+  'application/pdf',
+  'image/png,image/jpeg,image/webp,image/heic,image/heif,image/gif',
+  'audio/*,.m4a,.mp3,.ogg,.wav,.flac,.aac',
+  '.txt,.md,text/plain,text/markdown',
+  'application/json,.json',
+  '.csv,text/csv,.xlsx,.xls',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+].join(',')
+
+function sourceKindLabel(kind: NotebookSource['kind']): string {
+  switch (kind) {
+    case 'pdf':
+      return 'PDF'
+    case 'image':
+      return 'Imagen'
+    case 'audio':
+      return 'Audio'
+    case 'note':
+      return 'Nota'
+    case 'spreadsheet':
+      return 'Planilla'
+    case 'json':
+      return 'JSON'
+    default:
+      return kind
+  }
+}
+
+function sourcePayloadSnippet(source: NotebookSource): string {
+  try {
+    const payload = JSON.parse(source.payload_json || '{}') as Record<
+      string,
+      unknown
+    >
+    if (typeof payload.error === 'string') return payload.error
+    if (typeof payload.transcript === 'string' && payload.transcript.trim()) {
+      return payload.transcript.replace(/\s+/g, ' ').slice(0, 80)
+    }
+    if (typeof payload.text === 'string' && payload.text.trim()) {
+      return payload.text.replace(/\s+/g, ' ').slice(0, 80)
+    }
+    if (payload.annex === true) return 'Anexo de cuaderno'
+    const ingest = payload.ingest as { pages_imported?: number } | undefined
+    if (ingest?.pages_imported) return `${ingest.pages_imported} hoja(s)`
+    if (Array.isArray(payload.applied_slots) && payload.applied_slots.length) {
+      return `${payload.applied_slots.length} página(s)`
+    }
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
 const EXPLANATION_SEPARATOR = '____________________'
 
 function pageHasAiExplanation(p: NotebookPage): boolean {
@@ -80,6 +136,8 @@ export function BibliotecaSection({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [pages, setPages] = useState<NotebookPage[]>([])
   const [index, setIndex] = useState<NotebookIndexEntry[]>([])
+  const [sources, setSources] = useState<NotebookSource[]>([])
+  const [noteDraft, setNoteDraft] = useState('')
   const [summary, setSummary] = useState<{
     pendiente_validacion: number
     pendiente_vision: number
@@ -106,6 +164,7 @@ export function BibliotecaSection({
   const [fullReading, setFullReading] = useState(false)
   const [explaining, setExplaining] = useState(false)
   const [sendingCorpus, setSendingCorpus] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [readModalOpen, setReadModalOpen] = useState(false)
   const [readModalMinimized, setReadModalMinimized] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
@@ -132,6 +191,7 @@ export function BibliotecaSection({
     const res = await api.getNotebook(id)
     setPages(res.pages)
     setIndex(res.index)
+    setSources(res.sources ?? [])
     setSummary(res.summary)
     setVisionQueue({
       running: res.vision_queue.running,
@@ -159,7 +219,8 @@ export function BibliotecaSection({
       visionQueue.running ||
       visionQueue.pending > 0 ||
       visionQueue.confirm_running ||
-      visionQueue.confirm_pending > 0
+      visionQueue.confirm_pending > 0 ||
+      sources.some((s) => s.status === 'queued' || s.status === 'processing')
     const id = window.setInterval(() => {
       void loadDetail(selectedId).catch(() => undefined)
     }, busy || readModalOpen ? 1500 : 4000)
@@ -173,6 +234,7 @@ export function BibliotecaSection({
     visionQueue.pending,
     visionQueue.confirm_running,
     visionQueue.confirm_pending,
+    sources,
   ])
 
   const openNotebook = async (id: string) => {
@@ -241,17 +303,53 @@ export function BibliotecaSection({
       ? filesInput
       : Array.from(filesInput)
     if (files.length === 0) return
-    const pdfs = files.filter(
-      (f) =>
-        f.type === 'application/pdf' ||
-        f.name.toLowerCase().endsWith('.pdf'),
-    )
-    const images = files.filter((f) => !pdfs.includes(f))
-    for (const pdf of pdfs) {
-      await onPdf(pdf)
+    setUploading(true)
+    setError(null)
+    try {
+      const { sources: created, warning } = await api.uploadNotebookSources(
+        selectedId,
+        files,
+      )
+      if (warning) setError(warning)
+      setSources((prev) => {
+        const ids = new Set(created.map((s) => s.id))
+        return [...prev.filter((s) => !ids.has(s.id)), ...created]
+      })
+      await loadDetail(selectedId)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al subir fuentes')
+    } finally {
+      setUploading(false)
     }
-    if (images.length > 0) {
-      await onImages(images, { mode: 'append' })
+  }
+
+  const submitNote = async () => {
+    if (!selectedId || !noteDraft.trim()) return
+    setUploading(true)
+    setError(null)
+    try {
+      await api.addNotebookSourceNote(selectedId, noteDraft)
+      setNoteDraft('')
+      await loadDetail(selectedId)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al guardar la nota')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const removeSource = async (source: NotebookSource) => {
+    if (!selectedId) return
+    const ok = window.confirm(`¿Quitar fuente «${source.original_name}»?`)
+    if (!ok) return
+    try {
+      await api.deleteNotebookSource(selectedId, source.id)
+      await loadDetail(selectedId)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'No se pudo borrar la fuente')
     }
   }
 
@@ -334,62 +432,76 @@ export function BibliotecaSection({
     }
   }
 
+  const startValidateAllExplanations = async () => {
+    if (!selectedId) return
+    const n = pages.filter(
+      (p) => p.status === 'Validada' && pageHasAiExplanation(p),
+    ).length
+    if (n === 0) {
+      setError('No hay explicaciones IA pendientes de validar')
+      return
+    }
+    const ok = window.confirm(
+      `¿Dar por válidas ${n} explicación(es) e integrarlas al corpus?\nLas sin peso reciben 7.`,
+    )
+    if (!ok) return
+    setSendingCorpus(true)
+    setError(null)
+    setReadModalOpen(true)
+    setReadModalMinimized(false)
+    try {
+      const res = await api.validateAllNotebookExplanations(selectedId, 7)
+      setVisionQueue({
+        running: res.vision_queue.running,
+        pending: res.vision_queue.pending,
+        confirm_running: res.vision_queue.confirm_running,
+        confirm_pending: res.vision_queue.confirm_pending,
+        current: res.vision_queue.current ?? null,
+        logs: res.vision_queue.logs ?? [],
+        confirm_jobs: res.vision_queue.confirm_jobs,
+      })
+      await loadDetail(selectedId)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al validar todo')
+    } finally {
+      setSendingCorpus(false)
+    }
+  }
+
+  const startExport = async () => {
+    if (!selectedId) return
+    setExporting(true)
+    setError(null)
+    try {
+      await api.exportNotebook(selectedId, selected?.title || 'cuaderno')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al exportar')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const openPageAnalysis = (slotIndex: number) => {
     setValidateSlot(slotIndex)
     setMode('validate')
   }
 
-  const onPdf = async (file: File | null) => {
-    if (!selectedId || !file) return
-    setUploading(true)
-    setError(null)
-    try {
-      const res = await api.ingestNotebookPdf(selectedId, file)
-      if (res.warning) setError(res.warning)
-      await loadDetail(selectedId)
-      onChanged()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al importar PDF')
-    } finally {
-      setUploading(false)
+  const openExplainValidate = (slotIndex?: number) => {
+    const candidates = pages
+      .filter((p) => p.status === 'Validada' && pageHasAiExplanation(p))
+      .map((p) => p.slot_index)
+      .sort((a, b) => a - b)
+    if (candidates.length === 0) {
+      setError('No hay hojas Validada con explicación IA para valorar')
+      return
     }
-  }
-
-  const onImages = async (
-    filesInput: FileList | File[] | null,
-    opts?: { mode?: 'append' | 'from_slot'; startSlot?: number },
-  ) => {
-    if (!selectedId || !filesInput) return
-    const files = (
-      Array.isArray(filesInput) ? filesInput : Array.from(filesInput)
-    ).sort((a, b) =>
-      a.name.localeCompare(b.name, undefined, { numeric: true }),
-    )
-    if (files.length === 0) return
-    setUploading(true)
-    setError(null)
-    try {
-      const res = await api.ingestNotebookImages(selectedId, files, opts)
-      const msg = [
-        `${res.pages_imported} imagen(es) → slots ${res.slots_assigned.join(', ') || '—'}`,
-        res.pending_ocr
-          ? `${res.pending_ocr} listas para OCR (Procesar cuaderno)`
-          : null,
-        res.warning || null,
-      ]
-        .filter(Boolean)
-        .join(' · ')
-      if (msg) setError(msg)
-      await loadDetail(selectedId)
-      if (res.slots_assigned.length > 0) {
-        setSpread(spreadIndexForSlot(res.slots_assigned[0]))
-      }
-      onChanged()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Error al importar imágenes')
-    } finally {
-      setUploading(false)
-    }
+    const preferred =
+      slotIndex != null && candidates.includes(slotIndex)
+        ? slotIndex
+        : candidates[0]!
+    setValidateSlot(preferred)
+    setMode('explain-validate')
   }
 
   const removeNotebook = async (id: string, title: string) => {
@@ -479,19 +591,73 @@ export function BibliotecaSection({
     (p) => p.status === 'PendienteValidacion',
   ).length
   const validadas = pages.filter((p) => p.status === 'Validada').length
-  const canGenerateExplanations =
-    validadas > 0 && pendingOcr === 0 && pendingVal === 0
+  const validadasSinExplicacion = pages.filter(
+    (p) => p.status === 'Validada' && !pageHasAiExplanation(p),
+  ).length
+  const validadasConExplicacion = pages.filter(
+    (p) => p.status === 'Validada' && pageHasAiExplanation(p),
+  ).length
+  // Explicaciones: alcanza con OCR listo + alguna Validada (el backend solo encola esas).
+  const canGenerateExplanations = validadas > 0 && pendingOcr === 0
+  const canValidateExplanations = validadasConExplicacion > 0
+  // Corpus de lote: cuaderno sin pendientes de validación y todas las Validada con IA.
   const canSendToCorpus =
-    canGenerateExplanations &&
-    pages
-      .filter((p) => p.status === 'Validada')
-      .every((p) => pageHasAiExplanation(p))
+    validadas > 0 &&
+    pendingOcr === 0 &&
+    pendingVal === 0 &&
+    validadasSinExplicacion === 0
+
+  const generateExplanationsTitle = !canGenerateExplanations
+    ? pendingOcr > 0
+      ? `Terminá el OCR primero (${pendingOcr} pendiente${pendingOcr === 1 ? '' : 's'})`
+      : 'No hay hojas aprobadas (Validada)'
+    : pendingVal > 0
+      ? `Explica ${validadas} hoja(s) aprobada(s); quedan ${pendingVal} por validar`
+      : undefined
+
+  const validateExplanationsTitle = !canValidateExplanations
+    ? validadasSinExplicacion > 0
+      ? `Generá explicaciones primero (${validadasSinExplicacion} sin IA)`
+      : 'No hay hojas con explicación IA para valorar'
+    : `Valorar ${validadasConExplicacion} explicación(es) 1–12 e integrar al corpus`
+
+  const sendToCorpusTitle = !canSendToCorpus
+    ? pendingOcr > 0
+      ? `Terminá el OCR primero (${pendingOcr} pendiente${pendingOcr === 1 ? '' : 's'})`
+      : pendingVal > 0
+        ? `Faltan ${pendingVal} hoja(s) por aprobar antes del corpus completo`
+        : validadas === 0
+          ? 'No hay hojas aprobadas para enviar'
+          : `Generá explicaciones primero (${validadasSinExplicacion} sin IA)`
+    : 'Envío directo (peso 7 si no valoraste). Preferí Validar explicaciones.'
 
   if (mode === 'validate' && selected) {
     return (
       <PageValidationPanel
         notebook={selected}
         slot={validateSlot}
+        onSlotChange={setValidateSlot}
+        onBack={() => {
+          setMode('reader')
+          void loadDetail(selected.id)
+        }}
+        onChanged={() => {
+          onChanged()
+          void loadDetail(selected.id)
+        }}
+        onValidateExplanation={() => {
+          setMode('explain-validate')
+        }}
+      />
+    )
+  }
+
+  if (mode === 'explain-validate' && selected) {
+    return (
+      <ExplanationValidationPanel
+        notebook={selected}
+        pages={pages}
+        initialSlot={validateSlot}
         onSlotChange={setValidateSlot}
         onBack={() => {
           setMode('reader')
@@ -571,10 +737,10 @@ export function BibliotecaSection({
           </div>
           <div className="nb-reader-actions">
             <label className="btn btn-tiny">
-              {uploading ? 'Importando…' : 'Importar'}
+              {uploading ? 'Importando…' : 'Fuentes'}
               <input
                 type="file"
-                accept="application/pdf,image/png,image/jpeg,image/webp,image/heic,image/heif,.pdf,.png,.jpg,.jpeg,.webp"
+                accept={SOURCE_ACCEPT}
                 multiple
                 hidden
                 disabled={uploading}
@@ -596,37 +762,146 @@ export function BibliotecaSection({
                   ? 'Encolando…'
                   : 'Procesar cuaderno'}
             </button>
-            {canGenerateExplanations && (
-              <button
-                type="button"
-                className="btn btn-tiny"
-                disabled={explaining || jobsBusy}
-                onClick={() => void startGenerateExplanations()}
-              >
-                {explaining || visionQueue.current?.phase === 'explain'
-                  ? 'Explicando…'
-                  : 'Generar explicaciones'}
-              </button>
-            )}
-            {canSendToCorpus && (
-              <button
-                type="button"
-                className="btn btn-tiny btn-primary"
-                disabled={sendingCorpus || jobsBusy}
-                onClick={() => void startSendToCorpus()}
-              >
-                {sendingCorpus || visionQueue.current?.phase === 'confirm'
-                  ? 'Enviando…'
-                  : 'Enviar al corpus'}
-              </button>
-            )}
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={!canGenerateExplanations || explaining || jobsBusy}
+              title={generateExplanationsTitle}
+              onClick={() => void startGenerateExplanations()}
+            >
+              {explaining || visionQueue.current?.phase === 'explain'
+                ? 'Explicando…'
+                : 'Generar explicaciones'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny btn-primary"
+              disabled={!canValidateExplanations || jobsBusy}
+              title={validateExplanationsTitle}
+              onClick={() => openExplainValidate()}
+            >
+              Validar explicaciones
+              {validadasConExplicacion > 0
+                ? ` (${validadasConExplicacion})`
+                : ''}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={!canValidateExplanations || sendingCorpus || jobsBusy}
+              title="Dar por válidas todas las explicaciones IA e integrarlas al corpus (peso 7)"
+              onClick={() => void startValidateAllExplanations()}
+            >
+              {sendingCorpus || visionQueue.current?.phase === 'confirm'
+                ? 'Validando…'
+                : 'Validar todo'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={!canSendToCorpus || sendingCorpus || jobsBusy}
+              title={sendToCorpusTitle}
+              onClick={() => void startSendToCorpus()}
+            >
+              {sendingCorpus || visionQueue.current?.phase === 'confirm'
+                ? 'Enviando…'
+                : 'Enviar al corpus'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={exporting}
+              onClick={() => void startExport()}
+            >
+              {exporting ? 'Exportando…' : 'Exportar'}
+            </button>
           </div>
         </div>
 
         {error && <p className="nb-error">{error}</p>}
+        {(pendingVal > 0 || pendingOcr > 0) && (
+          <p className="muted nb-pipeline-hint">
+            {pendingOcr > 0
+              ? `Faltan ${pendingOcr} hoja(s) de OCR.`
+              : ''}
+            {pendingOcr > 0 && pendingVal > 0 ? ' ' : ''}
+            {pendingVal > 0
+              ? `Faltan ${pendingVal} hoja(s) por aprobar antes del corpus completo.`
+              : ''}
+          </p>
+        )}
+        {pendingOcr === 0 &&
+          pendingVal === 0 &&
+          validadasSinExplicacion > 0 && (
+            <p className="muted nb-pipeline-hint">
+              {validadasSinExplicacion} hoja(s) aprobada(s) sin explicación IA —
+              usá «Generar explicaciones».
+            </p>
+          )}
 
-        <div className="nb-reader-layout">
+        <div
+          className="nb-reader-layout"
+          onDragOver={(e) => {
+            e.preventDefault()
+          }}
+          onDrop={(e) => {
+            e.preventDefault()
+            void onImport(e.dataTransfer.files)
+          }}
+        >
           <aside className="nb-index-rail">
+            <h3>Fuentes</h3>
+            <p className="muted nb-sources-hint">
+              PDF, fotos, audio, notas, Excel/JSON
+            </p>
+            <ul className="nb-source-list">
+              {sources.map((source) => {
+                const snippet = sourcePayloadSnippet(source)
+                return (
+                  <li key={source.id} className={`nb-source-item is-${source.status}`}>
+                    <div className="nb-source-item-main">
+                      <span className="nb-source-kind">
+                        {sourceKindLabel(source.kind)}
+                      </span>
+                      <span className="nb-source-name" title={source.original_name}>
+                        {source.original_name}
+                      </span>
+                      <span className="muted">
+                        {source.status}
+                        {snippet ? ` · ${snippet}` : ''}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-tiny btn-ghost"
+                      onClick={() => void removeSource(source)}
+                    >
+                      ×
+                    </button>
+                  </li>
+                )
+              })}
+              {sources.length === 0 && (
+                <li className="muted nb-index-empty">Sin fuentes todavía</li>
+              )}
+            </ul>
+            <textarea
+              className="nb-textarea nb-note-paste"
+              rows={3}
+              placeholder="Nota: mencioná pág. 12 / hoja 3 / slot 4 para anclarla"
+              value={noteDraft}
+              onChange={(e) => setNoteDraft(e.target.value)}
+              disabled={uploading}
+            />
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={uploading || !noteDraft.trim()}
+              onClick={() => void submitNote()}
+            >
+              Agregar nota
+            </button>
+
             <h3>Índice</h3>
             <input
               className="nb-input nb-index-search"
@@ -872,7 +1147,7 @@ export function BibliotecaSection({
         <div>
           <h2>Biblioteca</h2>
           <p className="muted">
-            Cuadernos físicos (PDF) y digitales · 80 hojas / 160 caras
+            Cuadernos físicos y digitales · fotos, PDF, audio, notas y planillas
           </p>
         </div>
         <div className="nb-create-row">

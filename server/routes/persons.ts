@@ -17,9 +17,13 @@ import {
 import { liveSuggestedMatch, expandMentionContext } from '../services/entityMatch.js'
 import {
   isProfileKind,
+  isDiscardKind,
+  isWaitingKind,
+  isGeografiaKind,
   normalizePersonKind,
   PROFILE_KINDS,
 } from '../services/personKinds.js'
+import { refinePersonKind } from '../services/nerGuards.js'
 import {
   buildWaitingWithMatches,
   listMasterProfiles,
@@ -171,6 +175,10 @@ personsRouter.get('/pending', (_req, res) => {
       if (meta.kind === 'agrupacion' || meta.kind === 'ficticio') {
         meta.kind = 'ficticia'
       }
+      meta.kind = refinePersonKind(
+        p.suggested_name,
+        typeof meta.kind === 'string' ? meta.kind : 'fisica',
+      )
 
       let suggested_match: {
         id: string
@@ -1077,8 +1085,8 @@ personsRouter.post('/proposals/:id/approve', (req, res) => {
     body.kind ?? meta.kind ?? 'fisica',
   )
 
-  // Abstracta / ruido → descartar (no crear perfil)
-  if (requestedKind === 'abstracta' || requestedKind === 'ruido') {
+  // Abstracta / ruido → descartar (no crear ficha)
+  if (isDiscardKind(requestedKind)) {
     db.prepare(
       `UPDATE entity_proposals SET status = 'rejected', resolved_at = ?,
          suggested_meta = ? WHERE id = ?`,
@@ -1105,15 +1113,92 @@ personsRouter.post('/proposals/:id/approve', (req, res) => {
   const mode: 'create' | 'link' =
     forceLink || proposal.proposal_type === 'link' ? 'link' : 'create'
 
+  // Geografía → tabla propia (categoría de entidad), no persons
+  if (isGeografiaKind(requestedKind) && mode === 'create') {
+    let aliasesRaw = body.aliases ?? meta.aliases ?? []
+    if (name !== originalName) {
+      const list =
+        typeof aliasesRaw === 'string'
+          ? aliasesRaw.split(',').map((s) => s.trim()).filter(Boolean)
+          : Array.isArray(aliasesRaw)
+            ? aliasesRaw.map((a) => String(a))
+            : []
+      if (!list.some((a) => a.toLowerCase() === originalName.toLowerCase())) {
+        list.push(originalName)
+      }
+      aliasesRaw = list
+    }
+    const aliasesJson = parseAliases(aliasesRaw)
+    const geoId = randomUUID()
+    db.exec('BEGIN')
+    try {
+      db.prepare(
+        `INSERT INTO geografia (
+          id, name, kind, aliases, notes, status, source, created_at, updated_at
+        ) VALUES (?, ?, 'lugar', ?, ?, 'active', 'extractor', ?, ?)`,
+      ).run(
+        geoId,
+        name,
+        aliasesJson,
+        body.notes?.trim() || null,
+        now,
+        now,
+      )
+
+      const nextMeta = JSON.stringify({
+        ...meta,
+        kind: 'geografia',
+        display_name: name,
+        original_name: originalName,
+        resolved_as: 'create',
+        entity_type: 'geografia',
+      })
+      db.prepare(
+        `UPDATE entity_proposals
+         SET suggested_name = ?, suggested_meta = ?, status = 'approved',
+             proposal_type = 'create', matched_entity_id = ?, resolved_at = ?
+         WHERE id = ?`,
+      ).run(name, nextMeta, geoId, now, proposal.id)
+
+      db.prepare(
+        `UPDATE entry_entities_raw SET name = ?, type = 'geografia'
+         WHERE entry_id = ? AND name = ? AND type IN ('person', 'persona', 'geografia')`,
+      ).run(name, proposal.entry_id, originalName)
+
+      const linkId = randomUUID()
+      db.prepare(
+        `INSERT INTO entity_links (id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at)
+         VALUES (?, 'geografia', ?, ?, NULL, 'mentioned', ?)`,
+      ).run(linkId, geoId, proposal.entry_id, now)
+
+      db.exec('COMMIT')
+      res.json({
+        ok: true,
+        geografia_id: geoId,
+        link_id: linkId,
+        proposal_id: proposal.id,
+        mode: 'create',
+        entity_type: 'geografia',
+      })
+    } catch (err) {
+      db.exec('ROLLBACK')
+      const message = err instanceof Error ? err.message : 'Error al aprobar'
+      res.status(400).json({ error: message })
+    }
+    return
+  }
+
   let personId: string
 
   db.exec('BEGIN')
   try {
     if (mode === 'create') {
       personId = randomUUID()
-      const personKind = isProfileKind(requestedKind)
+      const personKind = isWaitingKind(requestedKind)
         ? requestedKind
-        : 'fisica'
+        : isProfileKind(requestedKind)
+          ? requestedKind
+          : 'fisica'
 
       let aliasesRaw = body.aliases ?? meta.aliases ?? []
       if (name !== originalName) {
