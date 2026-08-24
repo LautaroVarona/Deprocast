@@ -36,6 +36,7 @@ import {
 import { searchSimilar } from '../services/embeddings.js'
 import { typeaheadEntities } from '../services/typeahead.js'
 import { dismissGraphLinkSuggestion } from '../services/graph.js'
+import { findGeografiaMatch } from '../services/geografia.js'
 
 export const personsRouter = Router()
 
@@ -1129,21 +1130,24 @@ personsRouter.post('/proposals/:id/approve', (req, res) => {
       aliasesRaw = list
     }
     const aliasesJson = parseAliases(aliasesRaw)
-    const geoId = randomUUID()
+    const match = findGeografiaMatch(name)
+    const geoId = match?.id ?? randomUUID()
     db.exec('BEGIN')
     try {
-      db.prepare(
-        `INSERT INTO geografia (
-          id, name, kind, aliases, notes, status, source, created_at, updated_at
-        ) VALUES (?, ?, 'lugar', ?, ?, 'active', 'extractor', ?, ?)`,
-      ).run(
-        geoId,
-        name,
-        aliasesJson,
-        body.notes?.trim() || null,
-        now,
-        now,
-      )
+      if (!match) {
+        db.prepare(
+          `INSERT INTO geografia (
+            id, name, kind, aliases, notes, status, source, created_at, updated_at
+          ) VALUES (?, ?, 'lugar', ?, ?, 'active', 'extractor', ?, ?)`,
+        ).run(
+          geoId,
+          name,
+          aliasesJson,
+          body.notes?.trim() || null,
+          now,
+          now,
+        )
+      }
 
       const nextMeta = JSON.stringify({
         ...meta,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { FreeZone } from './components/FreeZone'
 import { CustomsPanel } from './components/CustomsPanel'
 import { ValidatedSection } from './components/ValidatedSection'
@@ -12,22 +12,36 @@ import { RespaldoSection } from './components/RespaldoSection'
 import { CalendarioSection } from './components/calendario/CalendarioSection'
 import { AmazonaSection } from './components/AmazonaSection'
 import { MapaSection } from './components/mapa/MapaSection'
+import { AtlasSection } from './components/atlas/AtlasSection'
 import {
   DashboardSection,
   type DashboardNavigateTarget,
 } from './components/DashboardSection'
 import { DialogoSection } from './components/dialogo/DialogoSection'
+import { SentinelSection } from './components/sentinel/SentinelSection'
+import { DirectoSection } from './components/DirectoSection'
 import { FeedbackWidget } from './components/FeedbackWidget'
 import { NewUserGate } from './components/NewUserGate'
 import { AppFooter } from './components/AppFooter'
 import { DeprocastApp } from './components/deprocast/DeprocastApp'
 import { api } from './services/api'
 import { isDeprocastPath, usePathname } from './lib/path'
+import {
+  LiveSessionProvider,
+  useLiveSession,
+} from './live/LiveSessionContext'
 import type { AppRun } from './types'
+
+const AlephSection = lazy(() =>
+  import('./components/aleph/AlephSection').then((m) => ({
+    default: m.AlephSection,
+  })),
+)
 
 type View =
   | 'dashboard'
   | 'franca'
+  | 'directo'
   | 'aduana'
   | 'validada'
   | 'entidades'
@@ -37,10 +51,39 @@ type View =
   | 'biblioteca'
   | 'chats'
   | 'dialogo'
+  | 'sentinela'
   | 'respaldo'
   | 'calendario'
   | 'amazona'
   | 'mapa'
+  | 'atlas'
+  | 'aleph'
+
+function DirectoNavButton({
+  active,
+  onClick,
+}: {
+  active: boolean
+  onClick: () => void
+}) {
+  const { status } = useLiveSession()
+  const listening = status === 'listening'
+  return (
+    <button
+      type="button"
+      className={
+        active
+          ? `btn btn-tiny is-nav-active${listening ? ' is-live-listening' : ''}`
+          : `btn btn-tiny${listening ? ' is-live-listening' : ''}`
+      }
+      onClick={onClick}
+      title={listening ? 'Directo · escuchando' : 'Directo'}
+    >
+      Directo
+      {listening && <span className="nav-live-pulse" aria-hidden />}
+    </button>
+  )
+}
 
 export default function App() {
   const path = usePathname()
@@ -55,6 +98,7 @@ export default function App() {
   const [entityMode, setEntityMode] = useState<EntityHubMode>('perfiles')
   const [dialogoThreadId, setDialogoThreadId] = useState<string | null>(null)
   const [dialogoSeed, setDialogoSeed] = useState<string | null>(null)
+  const [atlasFocusId, setAtlasFocusId] = useState<string | null>(null)
   const preferHome = useRef(true)
   const sawPending = useRef(false)
   const sawRunning = useRef(false)
@@ -204,16 +248,17 @@ export default function App() {
   }
 
   return (
+    <LiveSessionProvider>
     <>
     <div
       className={
-        view === 'grafo' || view === 'mapa'
+        view === 'grafo' || view === 'mapa' || view === 'atlas' || view === 'aleph'
           ? 'app-shell is-graph-mode'
           : view === 'biblioteca'
             ? 'app-shell is-biblioteca-mode'
             : view === 'calendario'
               ? 'app-shell is-calendario-mode'
-              : view === 'dashboard' || view === 'dialogo'
+              : view === 'dashboard' || view === 'dialogo' || view === 'sentinela'
                 ? 'app-shell is-dashboard-mode'
                 : 'app-shell'
       }
@@ -242,6 +287,10 @@ export default function App() {
           >
             Zona franca
           </button>
+          <DirectoNavButton
+            active={view === 'directo'}
+            onClick={() => go('directo', true)}
+          />
           <button
             type="button"
             className={navClass('aduana')}
@@ -280,6 +329,13 @@ export default function App() {
           </button>
           <button
             type="button"
+            className={navClass('sentinela')}
+            onClick={() => go('sentinela', true)}
+          >
+            Sentinela
+          </button>
+          <button
+            type="button"
             className={navClass('chats')}
             title="Import de WhatsApp / redes"
             onClick={() => go('chats', true)}
@@ -313,6 +369,20 @@ export default function App() {
             onClick={() => go('mapa', true)}
           >
             Mapa
+          </button>
+          <button
+            type="button"
+            className={navClass('atlas')}
+            onClick={() => go('atlas', true)}
+          >
+            Atlas
+          </button>
+          <button
+            type="button"
+            className={navClass('aleph')}
+            onClick={() => go('aleph', true)}
+          >
+            Aleph
           </button>
           <button
             type="button"
@@ -357,13 +427,14 @@ export default function App() {
                 view === 'biblioteca' ||
                 view === 'chats' ||
                 view === 'dialogo' ||
+                view === 'sentinela' ||
                 view === 'respaldo' ||
                 view === 'calendario' ||
                 view === 'amazona'
               ? 'stage-validada'
               : view === 'entidades'
                 ? 'stage-entity'
-                : view === 'grafo' || view === 'mapa'
+                : view === 'grafo' || view === 'mapa' || view === 'atlas' || view === 'aleph'
                   ? 'stage-graph'
                   : view === 'dashboard'
                     ? 'stage-dashboard'
@@ -376,6 +447,8 @@ export default function App() {
             refreshKey={refreshKey}
             onNavigate={onDashboardNavigate}
           />
+        ) : view === 'directo' ? (
+          <DirectoSection />
         ) : view === 'aduana' ? (
           <CustomsPanel
             refreshKey={refreshKey}
@@ -393,6 +466,8 @@ export default function App() {
             seedQuery={dialogoSeed}
             onSeedConsumed={() => setDialogoSeed(null)}
           />
+        ) : view === 'sentinela' ? (
+          <SentinelSection refreshKey={refreshKey} />
         ) : view === 'chats' ? (
           <ChatsSection refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'validada' ? (
@@ -405,6 +480,10 @@ export default function App() {
             personPending={personPending}
             projectPending={projectPending}
             initialMode={entityMode}
+            onOpenAtlas={(id) => {
+              setAtlasFocusId(id)
+              go('atlas', true)
+            }}
           />
         ) : view === 'quantomos' ? (
           <QuantomosSection refreshKey={refreshKey} />
@@ -417,7 +496,27 @@ export default function App() {
         ) : view === 'amazona' ? (
           <AmazonaSection refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'mapa' ? (
-          <MapaSection refreshKey={refreshKey} onChanged={bump} />
+          <MapaSection
+            refreshKey={refreshKey}
+            onChanged={bump}
+            onOpenAtlas={() => go('atlas', true)}
+          />
+        ) : view === 'atlas' ? (
+          <AtlasSection
+            refreshKey={refreshKey}
+            focusId={atlasFocusId}
+            onFocusConsumed={() => setAtlasFocusId(null)}
+          />
+        ) : view === 'aleph' ? (
+          <Suspense
+            fallback={
+              <div className="aleph-workspace">
+                <p className="muted aleph-fallback">Cargando Aleph…</p>
+              </div>
+            }
+          >
+            <AlephSection />
+          </Suspense>
         ) : (
           <FreeZone
             onProcessed={() => {
@@ -433,5 +532,6 @@ export default function App() {
     <AppFooter />
     <FeedbackWidget view={view} />
     </>
+    </LiveSessionProvider>
   )
 }

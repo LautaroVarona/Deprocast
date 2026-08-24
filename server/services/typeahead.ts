@@ -415,7 +415,7 @@ function searchGeografia(qNorm: string, limit: number): TypeaheadHit[] {
     db
       .prepare(
         `SELECT id, name, kind, aliases FROM geografia
-         WHERE source = 'manual'
+         WHERE source IN ('manual', 'official')
            AND (merged_into IS NULL OR merged_into = '')
            AND (status IS NULL OR status = 'active')`,
       )
@@ -578,7 +578,7 @@ export function listRecentEntities(
       db
         .prepare(
           `SELECT id, name, kind, aliases FROM geografia
-           WHERE source = 'manual'
+           WHERE source IN ('manual', 'official')
              AND (merged_into IS NULL OR merged_into = '')
            ORDER BY updated_at DESC
            LIMIT ?`,

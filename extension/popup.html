@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>El Cofre</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <span class="mark" id="mark" aria-hidden="true"></span>
+        <div>
+          <h1>El Cofre</h1>
+          <p class="sub">Captura → Aduana HITL</p>
+        </div>
+      </div>
+      <p id="health" class="health">Comprobando servidor…</p>
+    </header>
+
+    <p id="status" class="status">Listo.</p>
+    <p id="error" class="error" hidden></p>
+
+    <label class="check">
+      <input type="checkbox" id="mic" checked />
+      Incluir micrófono
+    </label>
+
+    <div class="row">
+      <button type="button" id="btn-desktop" class="primary">Pantalla / ventana</button>
+      <button type="button" id="btn-tab">Solo pestaña</button>
+    </div>
+    <button type="button" id="btn-stop" class="danger" hidden>Detener y enviar</button>
+    <button type="button" id="btn-retry" hidden>Reintentar envío</button>
+
+    <p class="hint">
+      No registra teclas ni formularios. Solo URL, título y permanencia de pestaña,
+      más audio/video de lo que elijas compartir.
+    </p>
+
+    <script type="module" src="./popup.js"></script>
+  </body>
+</html>

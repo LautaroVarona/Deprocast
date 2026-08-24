@@ -193,12 +193,17 @@ function hydrateSeed(
       title: string
       content: string | null
       entry_id: string
+      stage: string | null
+      recognized: number
     }>(
       db
-        .prepare(`SELECT title, content, entry_id FROM quantomos WHERE id = ?`)
+        .prepare(
+          `SELECT title, content, entry_id, stage, recognized FROM quantomos WHERE id = ?`,
+        )
         .get(objectId),
     )
     if (!q) return null
+    if (q.recognized !== 1 && (q.stage ?? 'proto') !== 'sealed') return null
     return {
       type: 'quantomo',
       id: objectId,
@@ -771,7 +776,8 @@ export function getGraphSnapshot(opts?: {
         e.status AS entry_status
       FROM quantomos q
       INNER JOIN entries e ON e.id = q.entry_id
-      WHERE q.recognized = 1 OR e.status = 'pending_review'
+      WHERE (q.recognized = 1 AND coalesce(q.stage, 'sealed') = 'sealed')
+         OR e.status = 'pending_review'
       ORDER BY q.hermetic_weight DESC
       LIMIT 1200
       `,

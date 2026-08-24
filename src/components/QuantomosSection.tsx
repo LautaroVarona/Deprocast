@@ -17,6 +17,7 @@ type QuantomoRow = Quantomo & {
 
 type SortMode = 'weight' | 'date' | 'title'
 type Pane = 'quantomos' | 'links'
+type StageFilter = 'sealed' | 'proto' | 'pre' | 'premium' | 'all'
 
 function formatTs(iso: string | null): string {
   if (!iso) return '—'
@@ -44,8 +45,15 @@ export function QuantomosSection({ refreshKey }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [universeFilter, setUniverseFilter] = useState<string>('all')
+  const [stageFilter, setStageFilter] = useState<StageFilter>('sealed')
   const [sortMode, setSortMode] = useState<SortMode>('weight')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [lattice, setLattice] = useState<{
+    canonical: number[] | null
+    domain_energies: number[]
+    seal_ok: boolean
+    premium?: number | null
+  } | null>(null)
 
   const [links, setLinks] = useState<LinkHarvest[]>([])
   const [linksTotal, setLinksTotal] = useState(0)
@@ -57,7 +65,7 @@ export function QuantomosSection({ refreshKey }: Props) {
     setLoading(true)
     setError(null)
     try {
-      const data = await api.listQuantomos()
+      const data = await api.listQuantomos(stageFilter)
       setQuantomos(data.quantomos)
       setUniverses(data.universes)
       setAvgWeight(data.avg_weight)
@@ -69,7 +77,7 @@ export function QuantomosSection({ refreshKey }: Props) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [stageFilter])
 
   const loadLinks = useCallback(async () => {
     setLinksBusy(true)
@@ -92,6 +100,30 @@ export function QuantomosSection({ refreshKey }: Props) {
   useEffect(() => {
     void load()
   }, [load, refreshKey])
+
+  useEffect(() => {
+    if (!selectedId) {
+      setLattice(null)
+      return
+    }
+    let cancelled = false
+    void api
+      .getQuantomoLattice(selectedId)
+      .then((data) => {
+        if (cancelled) return
+        setLattice({
+          canonical: data.canonical,
+          domain_energies: data.domain_energies,
+          seal_ok: data.seal_ok,
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setLattice(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedId])
 
   useEffect(() => {
     if (pane === 'links') void loadLinks()
@@ -292,6 +324,33 @@ export function QuantomosSection({ refreshKey }: Props) {
               )}
             </div>
 
+            <div className="filter-rail" role="tablist" aria-label="Etapa">
+              {(
+                [
+                  ['sealed', 'Sellados'],
+                  ['proto', 'Proto'],
+                  ['pre', 'Pre'],
+                  ['premium', 'Premium'],
+                  ['all', 'Todos'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={stageFilter === value}
+                  className={
+                    stageFilter === value
+                      ? 'filter-chip is-active'
+                      : 'filter-chip'
+                  }
+                  onClick={() => setStageFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
             <div className="profiles-toolbar">
               <label className="semantic-search">
                 <span className="mono">Buscar</span>
@@ -353,6 +412,7 @@ export function QuantomosSection({ refreshKey }: Props) {
                         <span className="quantomo-row-title">{q.title}</span>
                         <span className="quantomo-row-meta mono">
                           w{q.hermetic_weight ?? '—'}
+                          {q.stage ? ` · ${q.stage}` : ''}
                           {q.universe ? ` · ${q.universe}` : ''}
                           {` · ${q.entry_title}`}
                         </span>
@@ -370,7 +430,7 @@ export function QuantomosSection({ refreshKey }: Props) {
                     <>
                       <h3>{selected.title}</h3>
                       <p className="mono muted quantomo-inspector-meta">
-                        peso {selected.hermetic_weight ?? '—'}
+                        {selected.stage ?? '—'} · peso {selected.hermetic_weight ?? '—'}
                         {selected.universe
                           ? ` · universo ${selected.universe}`
                           : ''}
@@ -393,6 +453,45 @@ export function QuantomosSection({ refreshKey }: Props) {
                           <span className="muted">Sin contenido</span>
                         )}
                       </div>
+                      {lattice && (
+                        <div className="lattice-block">
+                          <p className="mono muted">
+                            L72 {lattice.seal_ok ? 'sello ok' : 'sin sello'}
+                          </p>
+                          {lattice.domain_energies.length > 0 && (
+                            <div className="lattice-energies">
+                              {lattice.domain_energies.map((e, i) => (
+                                <span
+                                  key={i}
+                                  className="lattice-energy"
+                                  style={{
+                                    opacity: Math.min(
+                                      1,
+                                      0.25 + e / (Math.max(...lattice.domain_energies) || 1),
+                                    ),
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          )}
+                          {lattice.canonical && lattice.canonical.length === 72 && (
+                            <div className="lattice-grid" aria-hidden>
+                              {lattice.canonical.map((cell, i) => (
+                                <span
+                                  key={i}
+                                  className="lattice-cell"
+                                  style={{
+                                    opacity: Math.min(
+                                      1,
+                                      0.15 + Math.abs(cell) / 8000,
+                                    ),
+                                  }}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </aside>

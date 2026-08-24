@@ -8,6 +8,7 @@ import {
   type TridentId,
 } from '../../lib/calendar/engine'
 import { DayColumn } from './ActivityChipList'
+import { CofrePanel } from './QuantomoPipePanels'
 import { SensoryClock } from './SensoryClock'
 
 const AUDIO_ACCEPT =
@@ -161,6 +162,7 @@ export function TrincheraView({
         </form>
         {ingestStatus && <p className="status-line ok">{ingestStatus}</p>}
         {ingestError && <p className="status-line err">{ingestError}</p>}
+        <CofrePanel />
       </aside>
     </div>
   )

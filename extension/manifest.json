@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "El Cofre",
+  "version": "0.1.0",
+  "description": "Captura de pantalla, micrófono y transcripción live hacia Deprocast (localhost).",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/cofre.png",
+    "48": "icons/cofre.png",
+    "128": "icons/cofre.png"
+  },
+  "action": {
+    "default_title": "El Cofre",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/cofre.png",
+      "48": "icons/cofre.png",
+      "128": "icons/cofre.png"
+    }
+  },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "permissions": [
+    "offscreen",
+    "storage",
+    "alarms",
+    "tabs",
+    "desktopCapture",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:3001/*",
+    "http://localhost:3001/*"
+  ]
+}

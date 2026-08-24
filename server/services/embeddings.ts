@@ -323,7 +323,8 @@ export async function embedApprovedEntry(entryId: string): Promise<void> {
   const quantomos = rows<{ id: string; title: string; content: string | null }>(
     db
       .prepare(
-        `SELECT id, title, content FROM quantomos WHERE entry_id = ? AND recognized = 1`,
+        `SELECT id, title, content FROM quantomos
+         WHERE entry_id = ? AND recognized = 1 AND coalesce(stage, 'sealed') = 'sealed'`,
       )
       .all(entryId),
   )

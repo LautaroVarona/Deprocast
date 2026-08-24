@@ -9,6 +9,7 @@ import {
   updateDialogoThread,
   type DialogoEntityRef,
 } from '../services/dialogo.js'
+import { closeDialogoThread } from '../services/quantomoStages.js'
 
 export const dialogoRouter = Router()
 
@@ -87,6 +88,26 @@ dialogoRouter.patch('/threads/:id', (req, res) => {
     res.status(500).json({
       error: err instanceof Error ? err.message : String(err),
     })
+  }
+})
+
+dialogoRouter.post('/threads/:id/close', async (req, res) => {
+  try {
+    const weight = Number(req.body?.hermetic_weight ?? req.body?.weight)
+    const title =
+      typeof req.body?.title === 'string' ? req.body.title : undefined
+    const result = await closeDialogoThread(String(req.params.id), weight, {
+      title,
+    })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const status = msg.includes('no encontrado')
+      ? 404
+      : msg.includes('cerrado') || msg.includes('vacío') || msg.includes('peso')
+        ? 400
+        : 500
+    res.status(status).json({ error: msg })
   }
 })
 

@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../services/api'
-import type { Geografia, GeoKind } from '../types'
+import type { Geografia, GeografiaTreeNode, GeoKind } from '../types'
+import { AtlasTree } from './atlas/AtlasTree'
 
 interface Props {
   refreshKey: number
   onChanged?: () => void
+  onOpenAtlas?: (id: string) => void
 }
 
 const GEO_KIND_LABEL: Record<GeoKind, string> = {
@@ -17,15 +19,24 @@ const GEO_KIND_LABEL: Record<GeoKind, string> = {
   otro: 'Otro',
 }
 
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return '?'
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase()
-  return `${parts[0]![0] ?? ''}${parts[1]![0] ?? ''}`.toUpperCase()
+function flatten(nodes: GeografiaTreeNode[]): Geografia[] {
+  const out: Geografia[] = []
+  const walk = (list: GeografiaTreeNode[]) => {
+    for (const n of list) {
+      out.push(n)
+      walk(n.children)
+    }
+  }
+  walk(nodes)
+  return out
 }
 
-export function GeografiaSection({ refreshKey, onChanged }: Props) {
-  const [places, setPlaces] = useState<Geografia[]>([])
+export function GeografiaSection({
+  refreshKey,
+  onChanged,
+  onOpenAtlas,
+}: Props) {
+  const [tree, setTree] = useState<GeografiaTreeNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
@@ -35,14 +46,19 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
   const [formKind, setFormKind] = useState<GeoKind>('lugar')
   const [formAliases, setFormAliases] = useState('')
   const [formNotes, setFormNotes] = useState('')
+  const [formParentId, setFormParentId] = useState('')
+  const [formWeight, setFormWeight] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(['geo-europa', 'geo-es', 'geo-es-vc']),
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const res = await api.listGeografia()
-      setPlaces(res.masters ?? res.places ?? [])
+      const res = await api.listGeografiaTree()
+      setTree(res.tree ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudieron cargar')
     } finally {
@@ -54,7 +70,9 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
     void load()
   }, [load, refreshKey])
 
+  const places = useMemo(() => flatten(tree), [tree])
   const selected = places.find((d) => d.id === selectedId) ?? null
+  const official = selected?.source === 'official'
 
   function openCreate() {
     setSelectedId(null)
@@ -62,6 +80,8 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
     setFormKind('lugar')
     setFormAliases('')
     setFormNotes('')
+    setFormParentId(selectedId ?? '')
+    setFormWeight(0)
     setInspectorOpen(true)
     setError(null)
     setStatus(null)
@@ -73,6 +93,8 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
     setFormKind(d.kind)
     setFormAliases((d.aliases_list ?? []).join(', '))
     setFormNotes(d.notes ?? '')
+    setFormParentId(d.parent_id ?? '')
+    setFormWeight(d.human_weight ?? 0)
     setInspectorOpen(true)
     setError(null)
     setStatus(null)
@@ -80,7 +102,7 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
 
   async function save() {
     const name = formName.trim()
-    if (!name || busy) return
+    if ((!name && !selected) || busy) return
     setBusy(true)
     setError(null)
     try {
@@ -89,17 +111,14 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
         .map((s) => s.trim())
         .filter(Boolean)
       if (selected) {
-        const res = await api.updateGeografia(selected.id, {
-          name,
-          kind: formKind,
+        await api.updateGeografia(selected.id, {
+          name: official ? undefined : name,
+          kind: official ? undefined : formKind,
           aliases,
           notes: formNotes,
+          parent_id: official ? undefined : formParentId || null,
+          human_weight: formWeight,
         })
-        setPlaces((prev) =>
-          prev
-            .map((d) => (d.id === selected.id ? res.place : d))
-            .sort((a, b) => a.name.localeCompare(b.name, 'es')),
-        )
         setStatus('Lugar actualizado')
       } else {
         const res = await api.createGeografia({
@@ -107,15 +126,16 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
           kind: formKind,
           aliases,
           notes: formNotes,
+          parent_id: formParentId || null,
         })
-        setPlaces((prev) =>
-          [...prev, res.place].sort((a, b) =>
-            a.name.localeCompare(b.name, 'es'),
-          ),
-        )
         setSelectedId(res.place.id)
-        setStatus('Lugar creado')
+        setStatus(
+          res.place.source === 'official'
+            ? 'Coincidió con el gazetteer oficial'
+            : 'Lugar creado',
+        )
       }
+      await load()
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo guardar')
@@ -125,15 +145,15 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
   }
 
   async function remove() {
-    if (!selected || busy) return
+    if (!selected || busy || official) return
     setBusy(true)
     setError(null)
     try {
       await api.deleteGeografia(selected.id)
-      setPlaces((prev) => prev.filter((d) => d.id !== selected.id))
       setSelectedId(null)
       setInspectorOpen(false)
       setStatus('Lugar borrado')
+      await load()
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo borrar')
@@ -142,13 +162,22 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
     }
   }
 
+  function toggle(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   return (
     <section className="panel entity-panel profiles-directory dominios-directory">
       <div className="panel-head entity-head">
         <div>
           <h2>Geografía</h2>
           <p className="muted mono">
-            Lugares del corpus · calles, ciudades, regiones
+            Árbol administrativo + topónimos de la RUN
             {places.length > 0 ? ` · ${places.length}` : ''}
           </p>
         </div>
@@ -170,34 +199,21 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
         <p className="muted mono">Cargando…</p>
       ) : places.length === 0 ? (
         <p className="muted mono profiles-empty">
-          Sin lugares. Creá uno o promové desde la sala de espera (clasificación
-          Geografía en el NER).
+          Sin lugares. El gazetteer se siembra al arrancar; si no aparece,
+          reinicia el servidor.
         </p>
       ) : (
-        <div className="profile-card-grid">
-          {places.map((d) => (
-            <button
-              key={d.id}
-              type="button"
-              className={[
-                'profile-card',
-                selectedId === d.id ? 'is-active' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => openEdit(d)}
-            >
-              <span className="profile-card-avatar" aria-hidden>
-                {initials(d.name)}
-              </span>
-              <span className="profile-card-body">
-                <span className="profile-card-name">{d.name}</span>
-                <span className="profile-card-meta mono">
-                  {GEO_KIND_LABEL[d.kind] ?? d.kind}
-                </span>
-              </span>
-            </button>
-          ))}
+        <div className="geografia-tree-wrap">
+          <AtlasTree
+            nodes={tree}
+            selectedId={selectedId}
+            expanded={expanded}
+            onToggle={toggle}
+            onSelect={(id) => {
+              const d = places.find((p) => p.id === id)
+              if (d) openEdit(d)
+            }}
+          />
         </div>
       )}
 
@@ -209,6 +225,7 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
             <input
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
+              disabled={official}
               placeholder="p. ej. Calle 18 · Montevideo"
             />
           </label>
@@ -216,6 +233,7 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
             <span className="mono">Tipo</span>
             <select
               value={formKind}
+              disabled={official}
               onChange={(e) => setFormKind(e.target.value as GeoKind)}
             >
               {(Object.keys(GEO_KIND_LABEL) as GeoKind[]).map((k) => (
@@ -224,6 +242,33 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
                 </option>
               ))}
             </select>
+          </label>
+          <label className="field">
+            <span className="mono">Padre</span>
+            <select
+              value={formParentId}
+              disabled={official}
+              onChange={(e) => setFormParentId(e.target.value)}
+            >
+              <option value="">(raíz)</option>
+              {places
+                .filter((p) => p.id !== selectedId)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label className="field">
+            <span className="mono">Peso {formWeight}</span>
+            <input
+              type="range"
+              min={0}
+              max={12}
+              value={formWeight}
+              onChange={(e) => setFormWeight(Number(e.target.value))}
+            />
           </label>
           <label className="field">
             <span className="mono">Aliases</span>
@@ -238,12 +283,15 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
             <textarea
               value={formNotes}
               onChange={(e) => setFormNotes(e.target.value)}
-              rows={5}
+              rows={4}
               placeholder="Contexto del lugar…"
             />
           </label>
+          {official ? (
+            <p className="muted mono">Nodo oficial · no se borra ni se reparenta.</p>
+          ) : null}
           <div className="actions-row">
-            {selected ? (
+            {selected && !official ? (
               <button
                 type="button"
                 className="btn btn-tiny btn-ghost danger"
@@ -251,6 +299,15 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
                 onClick={() => void remove()}
               >
                 Borrar
+              </button>
+            ) : null}
+            {selected && onOpenAtlas ? (
+              <button
+                type="button"
+                className="btn btn-tiny btn-ghost"
+                onClick={() => onOpenAtlas(selected.id)}
+              >
+                Ver en Atlas
               </button>
             ) : null}
             <button
@@ -266,7 +323,7 @@ export function GeografiaSection({ refreshKey, onChanged }: Props) {
             <button
               type="button"
               className="btn btn-tiny btn-primary"
-              disabled={busy || !formName.trim()}
+              disabled={busy || (!selected && !formName.trim())}
               onClick={() => void save()}
             >
               {selected ? 'Guardar' : 'Crear'}

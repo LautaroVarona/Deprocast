@@ -4,10 +4,6 @@ import { getDb } from '../db.js'
 import { row, rowRequired, rows } from '../sql.js'
 import type { Entry, EntryEntityRaw, PendingTask, ProposalBundle, Quantomo } from '../types.js'
 import { createEntityProposalsFromEntry } from '../services/entityMatch.js'
-import {
-  embedApprovedEntry,
-  enqueueEmbed,
-} from '../services/embeddings.js'
 
 export const proposalsRouter = Router()
 
@@ -141,7 +137,7 @@ proposalsRouter.post('/approve', (req, res) => {
       `UPDATE pending_tasks SET status = 'accepted' WHERE entry_id = ? AND status = 'suggested'`,
     ).run(entryId)
     db.prepare(
-      `UPDATE quantomos SET recognized = 1 WHERE entry_id = ?`,
+      `UPDATE quantomos SET stage = 'proto', recognized = 0, source_kind = coalesce(source_kind, 'audio') WHERE entry_id = ?`,
     ).run(entryId)
 
     const finalEntry = rowRequired<Entry>(
@@ -179,8 +175,6 @@ proposalsRouter.post('/approve', (req, res) => {
     db.exec('ROLLBACK')
     throw err
   }
-
-  enqueueEmbed(() => embedApprovedEntry(entryId))
 
   res.json({
     ok: true,

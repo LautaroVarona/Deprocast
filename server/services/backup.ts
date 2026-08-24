@@ -5,12 +5,15 @@ import {
   backfillCurrentRun,
   ensureTrincheraSeed,
   getDb,
+  getTrincheraNotebookId,
   rebuildSearchFts,
 } from '../db.js'
 import { pausePipeline } from './pipeline.js'
 
 export const BACKUP_FORMAT = 'deprocast-backup'
-export const BACKUP_VERSION = 2
+export const BACKUP_VERSION = 3
+export const VAULT_DIR = path.resolve(process.cwd(), 'vault')
+export const FEEDBACK_DIR = path.resolve(process.cwd(), 'feedback')
 
 export type BackupPurpose = 'copy' | 'metanalisis'
 
@@ -18,6 +21,7 @@ export const BACKUP_TABLES = [
   'notebooks',
   'entries',
   'quantomos',
+  'quantomo_lattices',
   'pending_tasks',
   'validated_file_metadata',
   'pages',
@@ -35,6 +39,7 @@ export const BACKUP_TABLES = [
   'agrupacion_members',
   'dominios',
   'geografia',
+  'geografia_geom',
   'bookmarks',
   'chat_sessions',
   'chat_messages',
@@ -68,6 +73,11 @@ export const BACKUP_TABLES = [
   'depro_ida_cards',
   'depro_research_packs',
   'depro_research_findings',
+  'sentinel_agents',
+  'sentinel_missions',
+  'sentinel_messages',
+  'sentinel_events',
+  'sentinel_skills',
 ] as const
 
 export type BackupTableName = (typeof BACKUP_TABLES)[number]
@@ -77,6 +87,7 @@ export const USER_ACTIVITY_TABLES = [
   'notebooks',
   'entries',
   'quantomos',
+  'quantomo_lattices',
   'pending_tasks',
   'validated_file_metadata',
   'pages',
@@ -130,7 +141,7 @@ export type BackupDump = {
   version: number
   purpose: BackupPurpose
   exported_at: string
-  include_media: false
+  include_media: boolean
   run: BackupRunMeta | null
   vault_index: VaultIndexEntry[]
   tables: Record<string, Record<string, unknown>[]>
@@ -141,14 +152,31 @@ export type BackupSummary = {
   include_media: false
   run: BackupRunMeta | null
   tables: Record<string, number>
+  vault_files: number
+  vault_bytes: number
+  feedback_files: number
+  feedback_bytes: number
   groups: {
     transcripciones: number
     perfiles: number
     conexiones: number
     quantomos: number
     validaciones: number
+    ida: number
     resto: number
   }
+}
+
+export type BackupTableCounts = Record<string, number>
+
+export type BackupApplyResult = {
+  ok: true
+  mode: 'replace' | 'merge'
+  tables: BackupTableCounts
+  inserted: BackupTableCounts
+  skipped: BackupTableCounts
+  remapped: { trinchera: { from: string; to: string } | null }
+  media: { copied: number; skipped: number }
 }
 
 function tableExists(db: DatabaseSync, name: string): boolean {
@@ -183,7 +211,7 @@ function dumpTable(
   return db.prepare(`SELECT * FROM "${name}"`).all() as Record<string, unknown>[]
 }
 
-function walkVaultIndex(root: string): VaultIndexEntry[] {
+function walkFileIndex(root: string): VaultIndexEntry[] {
   if (!fs.existsSync(root)) return []
   const out: VaultIndexEntry[] = []
   const walk = (dir: string) => {
@@ -216,9 +244,18 @@ function walkVaultIndex(root: string): VaultIndexEntry[] {
   return out
 }
 
+function treeStats(root: string): { files: number; bytes: number } {
+  const files = walkFileIndex(root)
+  return {
+    files: files.length,
+    bytes: files.reduce((sum, f) => sum + f.size, 0),
+  }
+}
+
 export function dumpBackup(opts?: {
   purpose?: BackupPurpose
   run?: BackupRunMeta | null
+  includeMedia?: boolean
 }): BackupDump {
   const db = getDb()
   const tables: BackupDump['tables'] = {}
@@ -230,9 +267,9 @@ export function dumpBackup(opts?: {
     version: BACKUP_VERSION,
     purpose: opts?.purpose ?? 'copy',
     exported_at: new Date().toISOString(),
-    include_media: false,
+    include_media: Boolean(opts?.includeMedia),
     run: opts?.run ?? null,
-    vault_index: walkVaultIndex(path.resolve(process.cwd(), 'vault')),
+    vault_index: walkFileIndex(VAULT_DIR),
     tables,
   }
 }
@@ -244,11 +281,22 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
     tables[name] = countTable(db, name)
   }
   const n = (key: BackupTableName) => tables[key] ?? 0
+  const vault = treeStats(VAULT_DIR)
+  const feedback = treeStats(FEEDBACK_DIR)
+  const ida =
+    n('depro_ida_items') +
+    n('depro_ida_cards') +
+    n('depro_research_packs') +
+    n('depro_research_findings')
   return {
     exported_at: new Date().toISOString(),
     include_media: false,
     run,
     tables,
+    vault_files: vault.files,
+    vault_bytes: vault.bytes,
+    feedback_files: feedback.files,
+    feedback_bytes: feedback.bytes,
     groups: {
       transcripciones: n('entries') + n('chat_messages') + n('pages'),
       perfiles: n('persons') + n('projects'),
@@ -260,12 +308,16 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('agrupacion_members'),
       quantomos: n('quantomos'),
       validaciones: n('validated_file_metadata'),
+      ida,
       resto:
         n('notebooks') +
         n('pending_tasks') +
         n('bookmarks') +
         n('chat_sessions') +
         n('chat_blocks') +
+        n('dialogo_threads') +
+        n('dialogo_messages') +
+        n('dashboard_pins') +
         n('link_harvest') +
         n('sandbox_graphs') +
         n('sandbox_nodes') +
@@ -277,6 +329,7 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('graph_link_dismissals') +
         n('agrupaciones') +
         n('dominios') +
+        n('geografia') +
         n('notebook_sources') +
         n('feedback_notes') +
         n('app_runs') +
@@ -293,11 +346,7 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('map_systems') +
         n('map_layers') +
         n('map_tags') +
-        n('depro_power_notes') +
-        n('depro_ida_items') +
-        n('depro_ida_cards') +
-        n('depro_research_packs') +
-        n('depro_research_findings'),
+        n('depro_power_notes'),
     },
   }
 }
@@ -318,7 +367,7 @@ export function serializeBackupCsv(dump: BackupDump): string {
     `# deprocast-backup v${dump.version}`,
     `# purpose ${dump.purpose}`,
     `# exported_at ${dump.exported_at}`,
-    `# include_media false`,
+    `# include_media ${dump.include_media}`,
     dump.run
       ? `# run ${dump.run.operator_name} ${dump.run.started_at} day ${dump.run.day_count}`
       : '# run none',
@@ -358,7 +407,7 @@ export function serializeBackupXml(dump: BackupDump): string {
     : ''
   const lines: string[] = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    `<deprocast format="${BACKUP_FORMAT}" version="${dump.version}" purpose="${dump.purpose}" exported_at="${xmlEscape(dump.exported_at)}" include_media="false"${runAttr}>`,
+    `<deprocast format="${BACKUP_FORMAT}" version="${dump.version}" purpose="${dump.purpose}" exported_at="${xmlEscape(dump.exported_at)}" include_media="${dump.include_media ? 'true' : 'false'}"${runAttr}>`,
   ]
   for (const name of BACKUP_TABLES) {
     const rows = dump.tables[name] ?? []
@@ -418,7 +467,7 @@ function parseDump(raw: unknown): BackupDump {
     throw new Error('El archivo no es un respaldo de Deprocast')
   }
   const version = Number(obj.version)
-  if (version !== 1 && version !== 2) {
+  if (version !== 1 && version !== 2 && version !== 3) {
     throw new Error(`Versión de respaldo no soportada: ${String(obj.version)}`)
   }
   if (!obj.tables || typeof obj.tables !== 'object') {
@@ -449,7 +498,7 @@ function parseDump(raw: unknown): BackupDump {
     version,
     purpose,
     exported_at: typeof obj.exported_at === 'string' ? obj.exported_at : '',
-    include_media: false,
+    include_media: obj.include_media === true,
     run: parseRunMeta(obj.run),
     vault_index: parseVaultIndex(obj.vault_index),
     tables,
@@ -467,15 +516,92 @@ function cellValue(
   return String(value)
 }
 
-export function restoreBackupFromJson(raw: unknown): {
-  ok: true
-  tables: Record<string, number>
-} {
+function emptyCounts(): BackupTableCounts {
+  const out: BackupTableCounts = {}
+  for (const name of BACKUP_TABLES) out[name] = 0
+  return out
+}
+
+function insertTableRows(
+  db: DatabaseSync,
+  name: string,
+  rows: Record<string, unknown>[],
+  mode: 'replace' | 'merge',
+): { inserted: number; skipped: number } {
+  if (!tableExists(db, name)) {
+    return { inserted: 0, skipped: rows.length }
+  }
+  const cols = tableColumns(db, name)
+  if (rows.length === 0 || cols.length === 0) {
+    return { inserted: 0, skipped: 0 }
+  }
+  const placeholders = cols.map(() => '?').join(', ')
+  const quoted = cols.map((c) => `"${c}"`).join(', ')
+  const verb = mode === 'merge' ? 'INSERT OR IGNORE' : 'INSERT'
+  const stmt = db.prepare(
+    `${verb} INTO "${name}" (${quoted}) VALUES (${placeholders})`,
+  )
+  let inserted = 0
+  let skipped = 0
+  for (const row of rows) {
+    const result = stmt.run(...cols.map((c) => cellValue(row[c])))
+    if (Number(result.changes ?? 0) > 0) inserted++
+    else skipped++
+  }
+  return { inserted, skipped }
+}
+
+function isTrincheraNotebook(row: Record<string, unknown>): boolean {
+  if (String(row.title ?? '') !== 'Trinchera') return false
+  const kind = row.kind
+  if (kind == null || kind === '') return true
+  return String(kind) === 'system'
+}
+
+function remapTrinchera(
+  dump: BackupDump,
+  localId: string,
+): { from: string; to: string } | null {
+  const nbs = dump.tables.notebooks ?? []
+  const tri = nbs.find(isTrincheraNotebook)
+  if (!tri || typeof tri.id !== 'string' || tri.id === localId) return null
+  const from = tri.id
+  for (const name of BACKUP_TABLES) {
+    const rows = dump.tables[name] ?? []
+    for (const row of rows) {
+      if (name === 'notebooks' && row.id === from) row.id = localId
+      if (row.notebook_id === from) row.notebook_id = localId
+    }
+  }
+  return { from, to: localId }
+}
+
+function prepareMergeRow(
+  name: BackupTableName,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = { ...row }
+  if (name === 'app_runs' && String(next.status) === 'current') {
+    next.status = 'imported'
+    if (next.ended_at == null || next.ended_at === '') {
+      next.ended_at = new Date().toISOString()
+    }
+  }
+  if (name === 'persons') {
+    const flag = next.is_operator
+    if (flag === 1 || flag === true || flag === '1') next.is_operator = 0
+  }
+  return next
+}
+
+export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
   const dump = parseDump(raw)
   const db = getDb()
   pausePipeline()
 
   const deleteOrder = [...BACKUP_TABLES].reverse()
+  const inserted = emptyCounts()
+  const skipped = emptyCounts()
 
   db.exec('BEGIN')
   try {
@@ -485,35 +611,76 @@ export function restoreBackupFromJson(raw: unknown): {
       }
     }
 
-    const inserted: Record<string, number> = {}
     for (const name of BACKUP_TABLES) {
-      if (!tableExists(db, name)) {
-        inserted[name] = 0
-        continue
-      }
-      const cols = tableColumns(db, name)
-      const rows = dump.tables[name] ?? []
-      if (rows.length === 0 || cols.length === 0) {
-        inserted[name] = 0
-        continue
-      }
-      const placeholders = cols.map(() => '?').join(', ')
-      const quoted = cols.map((c) => `"${c}"`).join(', ')
-      const stmt = db.prepare(
-        `INSERT INTO "${name}" (${quoted}) VALUES (${placeholders})`,
+      const result = insertTableRows(
+        db,
+        name,
+        dump.tables[name] ?? [],
+        'replace',
       )
-      for (const row of rows) {
-        const values = cols.map((c) => cellValue(row[c]))
-        stmt.run(...values)
-      }
-      inserted[name] = rows.length
+      inserted[name] = result.inserted
+      skipped[name] = result.skipped
     }
 
     rebuildSearchFts(db)
     db.exec('COMMIT')
     ensureTrincheraSeed()
     backfillCurrentRun(db)
-    return { ok: true, tables: inserted }
+    return {
+      ok: true,
+      mode: 'replace',
+      tables: inserted,
+      inserted,
+      skipped,
+      remapped: { trinchera: null },
+      media: { copied: 0, skipped: 0 },
+    }
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      /* ignore */
+    }
+    throw err
+  }
+}
+
+/** Inserta filas que no existen. No borra el universo destino. */
+export function mergeBackupFromJson(raw: unknown): BackupApplyResult {
+  const dump = parseDump(raw)
+  const db = getDb()
+  pausePipeline()
+  ensureTrincheraSeed()
+  const localTrinchera = getTrincheraNotebookId()
+  const trinchera = remapTrinchera(dump, localTrinchera)
+
+  const inserted = emptyCounts()
+  const skipped = emptyCounts()
+
+  db.exec('BEGIN')
+  try {
+    for (const name of BACKUP_TABLES) {
+      const prepared = (dump.tables[name] ?? []).map((row) =>
+        prepareMergeRow(name, row),
+      )
+      const result = insertTableRows(db, name, prepared, 'merge')
+      inserted[name] = result.inserted
+      skipped[name] = result.skipped
+    }
+
+    rebuildSearchFts(db)
+    db.exec('COMMIT')
+    ensureTrincheraSeed()
+    backfillCurrentRun(db)
+    return {
+      ok: true,
+      mode: 'merge',
+      tables: inserted,
+      inserted,
+      skipped,
+      remapped: { trinchera },
+      media: { copied: 0, skipped: 0 },
+    }
   } catch (err) {
     try {
       db.exec('ROLLBACK')
@@ -547,9 +714,15 @@ export function wipeUserActivity(): void {
       )
     }
     for (const name of deleteOrder) {
-      if (tableExists(db, name)) {
-        db.exec(`DELETE FROM "${name}"`)
+      if (!tableExists(db, name)) continue
+      if (name === 'embeddings') {
+        db.exec(
+          `DELETE FROM embeddings
+           WHERE object_type NOT IN ('sentinel_profile', 'sentinel_skill', 'doc')`,
+        )
+        continue
       }
+      db.exec(`DELETE FROM "${name}"`)
     }
     rebuildSearchFts(db)
     db.exec('COMMIT')

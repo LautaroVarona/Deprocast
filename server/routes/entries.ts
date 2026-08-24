@@ -15,6 +15,13 @@ import type {
   ValidatedFileMetadata,
 } from '../types.js'
 import { parseManualTags } from '../services/bookmarkProcess.js'
+import {
+  analyzeAudioSilence,
+  ensureEnhancedAudio,
+  enhancedAudioPath,
+  parseAudioAnalysis,
+} from '../services/audioAnalysis.js'
+import type { DiarizationPayload } from '../types.js'
 
 export const entriesRouter = Router()
 
@@ -210,8 +217,9 @@ entriesRouter.get('/queued', (_req, res) => {
 })
 
 entriesRouter.get('/criba', (_req, res) => {
+  const db = getDb()
   const entries = rows<Entry>(
-    getDb()
+    db
       .prepare(
         `SELECT * FROM entries
          WHERE status = 'pending_criba' AND source_type = 'audio'
@@ -219,7 +227,18 @@ entriesRouter.get('/criba', (_req, res) => {
       )
       .all(),
   )
-  res.json({ entries })
+  const operator = db
+    .prepare(
+      `SELECT id, name FROM persons
+       WHERE is_operator = 1
+         AND (merged_into IS NULL OR merged_into = '')
+       LIMIT 1`,
+    )
+    .get() as { id: string; name: string } | undefined
+  res.json({
+    entries,
+    operator: operator ?? null,
+  })
 })
 
 /** Elimina todas las cargas activas (queued + processing) y las saca del pipeline. */
@@ -410,7 +429,53 @@ entriesRouter.post('/:entryId/weight', async (req, res) => {
   res.json({ ok: true, entry: updated })
 })
 
-entriesRouter.get('/:entryId/media', (req, res) => {
+entriesRouter.get('/:entryId/analysis', async (req, res) => {
+  const entryId = req.params.entryId
+  if (!entryId) {
+    res.status(400).json({ error: 'entryId requerido' })
+    return
+  }
+  const db = getDb()
+  const entry = row<Entry>(
+    db.prepare(`SELECT * FROM entries WHERE id = ?`).get(entryId),
+  )
+  if (!entry?.vault_path) {
+    res.status(404).json({ error: 'Audio no encontrado' })
+    return
+  }
+
+  let analysis = parseAudioAnalysis(entry.audio_analysis_json)
+  if (!analysis) {
+    const abs = path.resolve(process.cwd(), entry.vault_path)
+    let utterances: DiarizationPayload['utterances'] | undefined
+    if (entry.diarization_json) {
+      try {
+        const dia = JSON.parse(entry.diarization_json) as DiarizationPayload
+        utterances = dia.utterances
+      } catch {
+        /* ignore */
+      }
+    }
+    analysis = await analyzeAudioSilence(abs, utterances)
+    if (analysis) {
+      db.prepare(
+        `UPDATE entries SET
+           audio_analysis_json = ?,
+           duration_sec = COALESCE(?, duration_sec)
+         WHERE id = ?`,
+      ).run(JSON.stringify(analysis), analysis.duration_sec, entryId)
+    }
+  }
+
+  if (!analysis) {
+    res.status(503).json({ error: 'No se pudo analizar el audio (¿ffmpeg?)' })
+    return
+  }
+
+  res.json({ analysis, entry_id: entryId })
+})
+
+entriesRouter.get('/:entryId/media', async (req, res) => {
   const entryId = req.params.entryId
   if (!entryId) {
     res.status(400).json({ error: 'entryId requerido' })
@@ -423,7 +488,27 @@ entriesRouter.get('/:entryId/media', (req, res) => {
     res.status(404).json({ error: 'Audio no encontrado' })
     return
   }
-  const abs = path.resolve(process.cwd(), entry.vault_path)
+  const variant = String(req.query.variant ?? 'original')
+  let abs = path.resolve(process.cwd(), entry.vault_path)
+  if (variant === 'enhanced') {
+    const enhanced = enhancedAudioPath(entry.vault_path)
+    if (fs.existsSync(enhanced)) {
+      abs = enhanced
+    } else {
+      const generated = await ensureEnhancedAudio(entry.vault_path)
+      if (generated) {
+        abs = generated
+        const db = getDb()
+        const existing = parseAudioAnalysis(entry.audio_analysis_json)
+        if (existing) {
+          existing.enhanced_available = true
+          db.prepare(
+            `UPDATE entries SET audio_analysis_json = ? WHERE id = ?`,
+          ).run(JSON.stringify(existing), entryId)
+        }
+      }
+    }
+  }
   if (!fs.existsSync(abs)) {
     res.status(404).json({ error: 'Archivo ausente en vault' })
     return

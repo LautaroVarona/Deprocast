@@ -147,6 +147,16 @@ export type DiarizationPayload = {
   speakers: number[]
 }
 
+export type AudioTimeRegion = { start: number; end: number }
+
+export type AudioAnalysisPayload = {
+  silence_regions: AudioTimeRegion[]
+  speech_regions: AudioTimeRegion[]
+  duration_sec: number | null
+  analyzed_at: string
+  enhanced_available?: boolean
+}
+
 export interface Entry {
   id: string
   notebook_id: string | null
@@ -167,6 +177,7 @@ export interface Entry {
   diarization_json?: string | null
   speaker_map?: string | null
   duration_sec?: number | null
+  audio_analysis_json?: string | null
   place_id?: string | null
 }
 
@@ -192,6 +203,11 @@ export interface Quantomo {
   suggested_weight?: number | null
   universe: string | null
   recognized: number
+  stage?: 'proto' | 'pre' | 'sealed'
+  source_kind?: string | null
+  source_id?: string | null
+  generation?: number
+  premium?: number | null
 }
 
 export type BookmarkStatus =
@@ -365,6 +381,9 @@ export type EmbeddingObjectType =
   | 'project'
   | 'link_context'
   | 'ida_item'
+  | 'sentinel_profile'
+  | 'sentinel_skill'
+  | 'doc'
 
 export interface CohereEntity {
   name: string
@@ -490,10 +509,17 @@ export interface Geografia {
   aliases_list?: string[]
   notes: string | null
   status: string
-  source: 'manual' | 'extractor' | string
+  source: 'manual' | 'extractor' | 'official' | string
   merged_into?: string | null
   created_at: string
   updated_at: string
+  parent_id?: string | null
+  admin_type?: string | null
+  admin_code?: string | null
+  capital_name?: string | null
+  iso_country?: string | null
+  human_weight?: number
+  sort_order?: number
 }
 
 export interface EntryEntityRaw {

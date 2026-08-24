@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '../services/api'
+import { api, type BackupApplyResult } from '../services/api'
 import type { AppRun } from '../types'
 
 interface Props {
@@ -8,6 +8,8 @@ interface Props {
 }
 
 type Summary = Awaited<ReturnType<typeof api.backupSummary>>
+
+const MERGE_RESULT_KEY = 'deprocast.respaldo.last'
 
 function downloadJsonFile(filename: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -21,13 +23,62 @@ function downloadJsonFile(filename: string, data: unknown) {
   URL.revokeObjectURL(url)
 }
 
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function sumCounts(counts: Record<string, number> | undefined): number {
+  if (!counts) return 0
+  return Object.values(counts).reduce((a, b) => a + b, 0)
+}
+
+function readStoredResult(): BackupApplyResult | null {
+  try {
+    const raw = sessionStorage.getItem(MERGE_RESULT_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as BackupApplyResult
+  } catch {
+    return null
+  }
+}
+
+function storeResult(result: BackupApplyResult) {
+  try {
+    sessionStorage.setItem(MERGE_RESULT_KEY, JSON.stringify(result))
+  } catch {
+    /* ignore quota */
+  }
+}
+
+function describeResult(result: BackupApplyResult): string {
+  const inserted = sumCounts(result.inserted)
+  const skipped = sumCounts(result.skipped)
+  const media = result.media
+    ? `${result.media.copied} archivos de media copiados, ${result.media.skipped} ya estaban`
+    : 'sin media'
+  const tri = result.remapped?.trinchera
+    ? ` · Trinchera remapeada`
+    : ''
+  if (result.mode === 'merge') {
+    return `Fusionado: ${inserted} filas nuevas, ${skipped} ya existían, ${media}${tri}.`
+  }
+  return `Universo reemplazado: ${inserted} filas, ${media}${tri}.`
+}
+
 export function RespaldoSection({ refreshKey, run }: Props) {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
-  const [file, setFile] = useState<File | null>(null)
-  const [confirm, setConfirm] = useState('')
+  const [mergeFile, setMergeFile] = useState<File | null>(null)
+  const [mergeConfirm, setMergeConfirm] = useState('')
+  const [merging, setMerging] = useState(false)
+  const [replaceFile, setReplaceFile] = useState<File | null>(null)
+  const [replaceConfirm, setReplaceConfirm] = useState('')
   const [restoring, setRestoring] = useState(false)
   const [destroyPhrase, setDestroyPhrase] = useState('')
   const [operatorConfirm, setOperatorConfirm] = useState('')
@@ -51,20 +102,49 @@ export function RespaldoSection({ refreshKey, run }: Props) {
     void load()
   }, [load, refreshKey])
 
-  function download(format: 'json' | 'csv' | 'xml') {
+  useEffect(() => {
+    const stored = readStoredResult()
+    if (!stored) return
+    setStatus(describeResult(stored))
+    try {
+      sessionStorage.removeItem(MERGE_RESULT_KEY)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  function download(format: 'json' | 'csv' | 'xml' | 'zip') {
     window.location.href = `/api/backup?format=${format}`
   }
 
+  async function handleMerge() {
+    if (!mergeFile) return
+    if (mergeConfirm !== 'FUSIONAR') return
+    setMerging(true)
+    setError(null)
+    setStatus(null)
+    try {
+      const result = await api.mergeBackup(mergeFile)
+      storeResult(result)
+      setStatus(`${describeResult(result)} Recargando…`)
+      window.setTimeout(() => window.location.reload(), 1200)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Fusión fallida')
+      setMerging(false)
+    }
+  }
+
   async function handleRestore() {
-    if (!file) return
-    if (confirm !== 'REEMPLAZAR') return
+    if (!replaceFile) return
+    if (replaceConfirm !== 'REEMPLAZAR') return
     setRestoring(true)
     setError(null)
     setStatus(null)
     try {
-      await api.restoreBackup(file)
-      setStatus('Respaldo restaurado. Recargando…')
-      window.location.reload()
+      const result = await api.restoreBackup(replaceFile)
+      storeResult(result)
+      setStatus(`${describeResult(result)} Recargando…`)
+      window.setTimeout(() => window.location.reload(), 1200)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Restore fallido')
       setRestoring(false)
@@ -92,7 +172,13 @@ export function RespaldoSection({ refreshKey, run }: Props) {
   }
 
   const g = summary?.groups
-  const canRestore = Boolean(file) && confirm === 'REEMPLAZAR' && !restoring
+  const t = summary?.tables
+  const vaultBytes = (summary?.vault_bytes ?? 0) + (summary?.feedback_bytes ?? 0)
+  const vaultFiles = (summary?.vault_files ?? 0) + (summary?.feedback_files ?? 0)
+  const zipHeavy = vaultBytes > 200 * 1024 * 1024
+  const canMerge = Boolean(mergeFile) && mergeConfirm === 'FUSIONAR' && !merging
+  const canRestore =
+    Boolean(replaceFile) && replaceConfirm === 'REEMPLAZAR' && !restoring
   const canDestroy =
     !!run &&
     destroyPhrase === 'DESTRUIR' &&
@@ -111,10 +197,10 @@ export function RespaldoSection({ refreshKey, run }: Props) {
       </header>
 
       <p className="muted respaldo-warn">
-        Exportá una copia de la cuenta y seguí jugando. El JSON sirve para
-        importarlo en otro universo. No incluye audios, videos ni imágenes del
-        vault; sí un índice de esos archivos. AmazonA y el mapa no se tocan al
-        empezar de cero.
+        JSON lleva toda la SQLite, incluida IDA (investigaciones, cards,
+        cuarentena). ZIP agrega audios e imágenes del vault. Para llevar trabajo
+        a otra máquina con más datos, usá <strong>Fusionar</strong>. Reemplazar
+        borra el universo destino.
       </p>
 
       {run && (
@@ -152,21 +238,42 @@ export function RespaldoSection({ refreshKey, run }: Props) {
             <span>Validaciones</span>
           </div>
           <div>
+            <strong>{g.ida}</strong>
+            <span>IDA</span>
+            {t && (
+              <em className="respaldo-count-sub">
+                {t.depro_ida_items ?? 0} fichas · {t.depro_ida_cards ?? 0} cards ·{' '}
+                {(t.depro_research_packs ?? 0) + (t.depro_research_findings ?? 0)}{' '}
+                research
+              </em>
+            )}
+          </div>
+          <div>
             <strong>{g.resto}</strong>
             <span>Resto</span>
           </div>
         </div>
       )}
 
+      <p className="muted respaldo-media">
+        Media en disco: {vaultFiles} archivos ({formatBytes(vaultBytes)}). El
+        JSON no los incluye; el ZIP sí.
+        {zipHeavy &&
+          ' Si el ZIP es muy pesado para el browser, exportá JSON y copiá la carpeta vault/ a mano.'}
+      </p>
+
       <div className="respaldo-block">
         <h3>Respaldo (copiar y seguir)</h3>
         <p className="muted">
-          JSON es el único formato que se puede volver a importar. CSV y XML
-          son para lectura o planillas. No borra nada.
+          JSON y ZIP se pueden volver a importar. CSV y XML son para lectura o
+          planillas. No borra nada.
         </p>
         <div className="respaldo-actions">
           <button type="button" className="btn btn-primary" onClick={() => download('json')}>
             JSON
+          </button>
+          <button type="button" className="btn btn-primary" onClick={() => download('zip')}>
+            ZIP (con media)
           </button>
           <button type="button" className="btn" onClick={() => download('csv')}>
             CSV
@@ -177,24 +284,56 @@ export function RespaldoSection({ refreshKey, run }: Props) {
         </div>
       </div>
 
-      <div className="respaldo-block respaldo-danger">
-        <h3>Importar (reemplaza todo)</h3>
+      <div className="respaldo-block respaldo-merge">
+        <h3>Fusionar (sumar a este universo)</h3>
         <p className="muted">
-          Solo JSON de Deprocast. Escribí REEMPLAZAR para confirmar. Esta
-          acción no se puede deshacer.
+          JSON o ZIP de Deprocast. Inserta filas que no existen. No pisa IDA,
+          AmazonA ni la RUN de esta máquina. Escribí FUSIONAR. Usalo para
+          traer trabajo de otra notebook a la oficina.
         </p>
         <input
           type="file"
-          accept=".json,application/json"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          accept=".json,.zip,application/json,application/zip"
+          onChange={(e) => setMergeFile(e.target.files?.[0] ?? null)}
         />
-        {file && <p className="mono muted">{file.name}</p>}
+        {mergeFile && <p className="mono muted">{mergeFile.name}</p>}
+        <input
+          className="respaldo-confirm"
+          type="text"
+          placeholder="Escribí FUSIONAR"
+          value={mergeConfirm}
+          onChange={(e) => setMergeConfirm(e.target.value)}
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!canMerge}
+          onClick={() => void handleMerge()}
+        >
+          {merging ? 'Fusionando…' : 'Fusionar respaldo'}
+        </button>
+      </div>
+
+      <div className="respaldo-block respaldo-danger">
+        <h3>Reemplazar (borra este universo)</h3>
+        <p className="muted">
+          Borra todas las tablas de este ordenador y deja las del archivo. En
+          la oficina esto destruye el trabajo grande. JSON o ZIP. Escribí
+          REEMPLAZAR.
+        </p>
+        <input
+          type="file"
+          accept=".json,.zip,application/json,application/zip"
+          onChange={(e) => setReplaceFile(e.target.files?.[0] ?? null)}
+        />
+        {replaceFile && <p className="mono muted">{replaceFile.name}</p>}
         <input
           className="respaldo-confirm"
           type="text"
           placeholder="Escribí REEMPLAZAR"
-          value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
+          value={replaceConfirm}
+          onChange={(e) => setReplaceConfirm(e.target.value)}
           autoComplete="off"
         />
         <button
@@ -203,7 +342,7 @@ export function RespaldoSection({ refreshKey, run }: Props) {
           disabled={!canRestore}
           onClick={() => void handleRestore()}
         >
-          {restoring ? 'Restaurando…' : 'Restaurar respaldo'}
+          {restoring ? 'Restaurando…' : 'Reemplazar universo'}
         </button>
       </div>
 

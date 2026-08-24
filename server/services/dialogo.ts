@@ -20,6 +20,10 @@ export type DialogoThread = {
   entity_refs: DialogoEntityRef[]
   created_at: string
   updated_at: string
+  status: 'open' | 'closed'
+  closed_at: string | null
+  hermetic_weight: number | null
+  entry_id: string | null
 }
 
 export type DialogoMessage = {
@@ -72,6 +76,10 @@ function mapThread(r: {
   entity_refs: string
   created_at: string
   updated_at: string
+  status?: string | null
+  closed_at?: string | null
+  hermetic_weight?: number | null
+  entry_id?: string | null
 }): DialogoThread {
   return {
     id: r.id,
@@ -80,6 +88,11 @@ function mapThread(r: {
     entity_refs: parseEntityRefs(r.entity_refs),
     created_at: r.created_at,
     updated_at: r.updated_at,
+    status: r.status === 'closed' ? 'closed' : 'open',
+    closed_at: r.closed_at ?? null,
+    hermetic_weight:
+      typeof r.hermetic_weight === 'number' ? r.hermetic_weight : null,
+    entry_id: r.entry_id ?? null,
   }
 }
 
@@ -157,6 +170,7 @@ function buildSystemPrompt(
     'Sos Deprocast, el sistema operativo personal del operador.',
     'Respondé en español, claro y concreto.',
     'Usá el contexto recuperado del corpus. Si no hay evidencia, decilo; no inventes hechos.',
+    'El Corpus premium son quántomos sellados (retículo L72). Proto y pre son materia en maduración, no semillas RAG.',
     'No digas que sos un LLM genérico: sos el Oráculo de esta RUN.',
     sectionLine,
     '',
@@ -177,10 +191,15 @@ export function listDialogoThreads(): DialogoThread[] {
     entity_refs: string
     created_at: string
     updated_at: string
+    status: string | null
+    closed_at: string | null
+    hermetic_weight: number | null
+    entry_id: string | null
   }>(
     db
       .prepare(
-        `SELECT id, title, section_key, entity_refs, created_at, updated_at
+        `SELECT id, title, section_key, entity_refs, created_at, updated_at,
+                coalesce(status, 'open') AS status, closed_at, hermetic_weight, entry_id
          FROM dialogo_threads
          ORDER BY updated_at DESC`,
       )
@@ -201,10 +220,15 @@ export function getDialogoThread(id: string): {
     entity_refs: string
     created_at: string
     updated_at: string
+    status: string | null
+    closed_at: string | null
+    hermetic_weight: number | null
+    entry_id: string | null
   }>(
     db
       .prepare(
-        `SELECT id, title, section_key, entity_refs, created_at, updated_at
+        `SELECT id, title, section_key, entity_refs, created_at, updated_at,
+                coalesce(status, 'open') AS status, closed_at, hermetic_weight, entry_id
          FROM dialogo_threads WHERE id = ?`,
       )
       .get(id),
@@ -255,8 +279,8 @@ export function createDialogoThread(input: {
     : []
 
   db.prepare(
-    `INSERT INTO dialogo_threads (id, title, section_key, entity_refs, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO dialogo_threads (id, title, section_key, entity_refs, created_at, updated_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'open')`,
   ).run(id, title, sectionKey, JSON.stringify(refs), now, now)
 
   return {
@@ -266,6 +290,10 @@ export function createDialogoThread(input: {
     entity_refs: refs,
     created_at: now,
     updated_at: now,
+    status: 'open',
+    closed_at: null,
+    hermetic_weight: null,
+    entry_id: null,
   }
 }
 
@@ -320,6 +348,9 @@ export async function postDialogoMessage(
   const detail = getDialogoThread(threadId)
   if (!detail) {
     throw new Error('Hilo no encontrado')
+  }
+  if (detail.thread.status === 'closed') {
+    throw new Error('Hilo cerrado: abrí un addendum (hilo nuevo) si hace falta')
   }
   const text = content.trim()
   if (!text) {

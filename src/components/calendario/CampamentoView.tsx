@@ -16,6 +16,7 @@ import {
 } from '../../lib/calendar/engine'
 import { AGENT_CATALOG } from '../../lib/deprocast/agents'
 import { TYPOLOGIES, TYPOLOGY_LABEL } from '../../lib/deprocast/geometry'
+import { CampamentoQueue } from './QuantomoPipePanels'
 
 type WeekTask = CalendarTask & { source_type: string; dayKey: string }
 
@@ -287,6 +288,7 @@ export function CampamentoView({
             </li>
           ))}
         </ul>
+        <CampamentoQueue />
       </aside>
     </div>
   )

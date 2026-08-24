@@ -31,6 +31,9 @@ import { amazonaRouter } from './routes/amazona.js'
 import { mapRouter } from './routes/map.js'
 import { deprocastRouter } from './routes/deprocast.js'
 import { dialogoRouter } from './routes/dialogo.js'
+import { sentinelRouter } from './routes/sentinel.js'
+import { liveRouter } from './routes/live.js'
+import { attachLiveWsProxy } from './liveWs.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({
@@ -89,11 +92,17 @@ app.use('/api/amazona', amazonaRouter)
 app.use('/api/map', mapRouter)
 app.use('/api/deprocast', deprocastRouter)
 app.use('/api/dialogo', dialogoRouter)
+app.use('/api/sentinela', sentinelRouter)
+app.use('/api/live', liveRouter)
 
-app.listen(PORT, '127.0.0.1', () => {
+const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`[deprocast] server listening on http://127.0.0.1:${PORT}`)
   console.log(`[deprocast] Cohere key: ${cohereKeyFingerprint()}`)
-}).on('error', (err: NodeJS.ErrnoException) => {
+})
+
+attachLiveWsProxy(server)
+
+server.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
     console.error(
       `[deprocast] puerto ${PORT} ocupado. Cerrá el proceso anterior o matá el PID en ese puerto.`,

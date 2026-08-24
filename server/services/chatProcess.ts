@@ -16,7 +16,6 @@ import type {
 import { createBlocksForSession } from './chatBlocks.js'
 import { parseWhatsAppExport, type ParsedChat } from './chatParse.js'
 import { extractFromChatBlock } from './cohere.js'
-import { createEntityProposalsFromEntry } from './entityMatch.js'
 import { insertLinkHarvest } from './linkHarvest.js'
 import { clampTitleWords } from './titleUtils.js'
 
@@ -372,8 +371,8 @@ async function processOneBlock(
     db.prepare(
       `INSERT INTO quantomos (
         id, entry_id, title, content, hermetic_weight, universe, recognized,
-        human_weight, suggested_weight
-      ) VALUES (?, ?, ?, ?, ?, 'chat', 1, ?, ?)`,
+        human_weight, suggested_weight, stage, source_kind, source_id
+      ) VALUES (?, ?, ?, ?, ?, 'chat', 0, ?, ?, 'proto', 'chat_import', ?)`,
     ).run(
       quantomoId,
       entryId,
@@ -382,6 +381,7 @@ async function processOneBlock(
       weight,
       weight,
       weight,
+      block.id,
     )
 
     const insertEntityRaw = db.prepare(`
@@ -403,8 +403,6 @@ async function processOneBlock(
         }),
       )
     }
-
-    createEntityProposalsFromEntry(db, entryId)
 
     const insertLink = db.prepare(`
       INSERT INTO entity_links (

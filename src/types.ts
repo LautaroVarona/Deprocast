@@ -158,6 +158,16 @@ export type DiarizationPayload = {
   speakers: number[]
 }
 
+export type AudioTimeRegion = { start: number; end: number }
+
+export type AudioAnalysisPayload = {
+  silence_regions: AudioTimeRegion[]
+  speech_regions: AudioTimeRegion[]
+  duration_sec: number | null
+  analyzed_at: string
+  enhanced_available?: boolean
+}
+
 export interface Entry {
   id: string
   notebook_id: string | null
@@ -178,6 +188,7 @@ export interface Entry {
   diarization_json?: string | null
   speaker_map?: string | null
   duration_sec?: number | null
+  audio_analysis_json?: string | null
   place_id?: string | null
 }
 
@@ -191,6 +202,11 @@ export interface Quantomo {
   suggested_weight?: number | null
   universe: string | null
   recognized: number
+  stage?: 'proto' | 'pre' | 'sealed'
+  source_kind?: string | null
+  source_id?: string | null
+  generation?: number
+  premium?: number | null
 }
 
 export type BookmarkStatus =
@@ -540,15 +556,46 @@ export interface Geografia {
   aliases_list?: string[]
   notes: string | null
   status: string
-  source: 'manual' | 'extractor' | string
+  source: 'manual' | 'extractor' | 'official' | string
   merged_into?: string | null
   created_at: string
   updated_at: string
+  parent_id?: string | null
+  admin_type?: string | null
+  admin_code?: string | null
+  capital_name?: string | null
+  iso_country?: string | null
+  human_weight?: number
+  sort_order?: number
   suggested_match?: {
     id: string
     name: string
     score: number
   } | null
+}
+
+export type GeografiaTreeNode = Geografia & { children: GeografiaTreeNode[] }
+
+export type GeografiaMapPayload = {
+  node: Geografia
+  ancestors: Geografia[]
+  children: Geografia[]
+  features: {
+    type: 'FeatureCollection'
+    features: Array<{
+      type: 'Feature'
+      id: string
+      properties: {
+        id: string
+        name: string
+        human_weight: number
+        admin_type: string | null
+        role: 'self' | 'child'
+      }
+      geometry: unknown
+    }>
+  }
+  bbox: [number, number, number, number] | null
 }
 
 export interface EntityLink {
@@ -1346,6 +1393,10 @@ export interface DialogoThread {
   entity_refs: DialogoEntityRef[]
   created_at: string
   updated_at: string
+  status?: 'open' | 'closed'
+  closed_at?: string | null
+  hermetic_weight?: number | null
+  entry_id?: string | null
 }
 
 export interface DialogoMessage {
@@ -1361,5 +1412,76 @@ export interface DashboardPin {
   ref_type: DialogoEntityRefType
   ref_id: string
   label: string
+  updated_at: string
+}
+
+export type SentinelStatus =
+  | 'inspecting'
+  | 'ready'
+  | 'running'
+  | 'paused'
+  | 'error'
+
+export type SentinelMissionStatus =
+  | 'pending'
+  | 'running'
+  | 'paused'
+  | 'done'
+  | 'error'
+
+export type SentinelSkillStatus = 'draft' | 'accepted' | 'rejected'
+
+export interface SentinelAgent {
+  id: string
+  code: string
+  status: SentinelStatus
+  profile_md: string
+  created_at: string
+  updated_at: string
+}
+
+export interface SentinelMission {
+  id: string
+  agent_id: string
+  intro: string
+  instructions: string
+  resources: string[]
+  expected_output: string
+  status: SentinelMissionStatus
+  paused_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SentinelMessage {
+  id: string
+  mission_id: string
+  role: 'user' | 'assistant' | 'system' | 'tool'
+  content: string
+  created_at: string
+}
+
+export interface SentinelEvent {
+  id: string
+  agent_id: string
+  mission_id: string | null
+  kind: 'note' | 'observation' | 'timing' | 'suggestion' | 'error' | 'tool'
+  payload: string
+  created_at: string
+}
+
+export interface SentinelSkill {
+  id: string
+  agent_id: string
+  name: string
+  input: string
+  processing: string
+  output: string
+  kind: string
+  body: unknown
+  status: SentinelSkillStatus
+  weight: number | null
+  ida_item_id: string | null
+  created_at: string
   updated_at: string
 }

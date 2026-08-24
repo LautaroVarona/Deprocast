@@ -26,6 +26,30 @@ export const MODULE_CATALOG: DeproModule[] = [
     suggestedAgentIds: ['escriba', 'blob'],
   },
   {
+    id: 'directo',
+    label: 'Directo',
+    does: 'Escucha continua del micrófono vía Deepgram Live (proxy WS en el server). Feed interim/final en sesión.',
+    files: 'DirectoSection, live/deepgramLive.ts, liveWs.ts, routes/live.ts',
+    ipo: {
+      input: 'Audio del micrófono.',
+      processing: 'Proxy WSS con API key server-side + PCM linear16.',
+      output: 'Bloques de transcripción en memoria. Persistencia = El Cofre.',
+    },
+    suggestedAgentIds: ['escriba'],
+  },
+  {
+    id: 'cofre',
+    label: 'El Cofre',
+    does: 'Extensión MV3: captura pantalla/pestaña + mic + STT live. Al detener, ingest a pending_criba (sin re-STT). Telemetría de pestaña por chrome.tabs (URL/título/permanencia; sin teclas).',
+    files: 'extension/*, server/services/cofreIngest.ts, liveWs.ts',
+    ipo: {
+      input: 'Pantalla o pestaña + mic + timeline de navegación.',
+      processing: 'Offscreen MediaRecorder + PCM al proxy Deepgram. POST /api/ingest/cofre.',
+      output: 'Entry audio en pending_criba + cofre.json en vault.',
+    },
+    suggestedAgentIds: ['escriba'],
+  },
+  {
     id: 'pipeline',
     label: 'Pipeline de audio',
     does: 'STT → extract → review. Cola asíncrona.',
@@ -96,6 +120,18 @@ export const MODULE_CATALOG: DeproModule[] = [
       output: 'Respuesta grounded en la RUN.',
     },
     suggestedAgentIds: ['oraculo', 'mnemosyne'],
+  },
+  {
+    id: 'sentinela',
+    label: 'Sentinela',
+    does: 'Instancias que inspeccionan producto y código, arman perfil y ejecutan misiones de análisis con pausa, logs y skills propias.',
+    files: 'SentinelSection, sentinel.ts, alma-sentinela.md',
+    ipo: {
+      input: 'Nacimiento (harvest) o comando escrito.',
+      processing: 'Inspección → perfil → loop de tools allowlist + RAG.',
+      output: 'Notas, timings, skills HITL, perfil persistido.',
+    },
+    suggestedAgentIds: ['sentinela', 'mnemosyne'],
   },
   {
     id: 'validada',
@@ -182,9 +218,33 @@ export const MODULE_CATALOG: DeproModule[] = [
     suggestedAgentIds: ['cartografo'],
   },
   {
+    id: 'atlas',
+    label: 'Atlas',
+    does: 'Mapa administrativo y listado jerárquico (continente → nación → subdivisiones oficiales).',
+    files: 'atlas/*, geografia.ts, geoGazetteerSeed.ts',
+    ipo: {
+      input: 'Gazetteer + peso del operador.',
+      processing: 'Árbol parent_id + polígonos.',
+      output: 'Canvas y lista de la misma fila.',
+    },
+    suggestedAgentIds: ['cartografo'],
+  },
+  {
+    id: 'aleph',
+    label: 'Aleph',
+    does: 'Motor espacial: zoom logarítmico, LOD cósmico→micro, telemetría BPM/EEG, placeholders anatómicos.',
+    files: 'AlephSection, UniverseEngine, aleph/*, aleph.md',
+    ipo: {
+      input: 'Cámara + sistemas + telemetría (BPM, EEG).',
+      processing: 'LOD por distancia, pulso de escala, grafo de escena.',
+      output: 'Vista espacial interactiva.',
+    },
+    suggestedAgentIds: ['soma', 'noos', 'cartografo'],
+  },
+  {
     id: 'respaldo',
     label: 'Respaldo',
-    does: 'Export/restore JSON; wipe de nuevo usuario.',
+    does: 'Export JSON/ZIP; fusionar o reemplazar; wipe de nuevo usuario.',
     files: 'RespaldoSection, backup.ts',
     ipo: {
       input: 'DB.',

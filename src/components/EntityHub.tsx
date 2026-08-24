@@ -20,6 +20,7 @@ interface Props {
   personPending?: number
   projectPending?: number
   initialMode?: EntityHubMode
+  onOpenAtlas?: (id: string) => void
 }
 
 export function EntityHub({
@@ -28,6 +29,7 @@ export function EntityHub({
   personPending = 0,
   projectPending = 0,
   initialMode = 'perfiles',
+  onOpenAtlas,
 }: Props) {
   const [mode, setMode] = useState<EntityHubMode>(initialMode)
   const [agrupacionCount, setAgrupacionCount] = useState(0)
@@ -160,7 +162,11 @@ export function EntityHub({
       ) : mode === 'dominios' ? (
         <DominiosSection refreshKey={refreshKey} onChanged={onChanged} />
       ) : mode === 'geografia' ? (
-        <GeografiaSection refreshKey={refreshKey} onChanged={onChanged} />
+        <GeografiaSection
+          refreshKey={refreshKey}
+          onChanged={onChanged}
+          onOpenAtlas={onOpenAtlas}
+        />
       ) : (
         <PersonsSection
           refreshKey={refreshKey}

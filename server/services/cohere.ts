@@ -2010,3 +2010,157 @@ export async function chatWithCorpus(opts: {
   }
   return text
 }
+
+export type ChatToolSpec = {
+  type: 'function'
+  function: {
+    name: string
+    description: string
+    parameters: Record<string, unknown>
+  }
+}
+
+export type ChatToolCall = {
+  id: string
+  name: string
+  arguments: Record<string, unknown>
+}
+
+export type ChatToolTurn =
+  | { role: 'user' | 'assistant' | 'system'; content: string }
+  | { role: 'assistant'; content?: string; tool_calls: unknown }
+  | { role: 'tool'; tool_call_id: string; content: string }
+
+function parseJsonObject(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>
+  }
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>
+      }
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+
+export function parseCohereToolCalls(data: unknown): ChatToolCall[] {
+  const root = data as {
+    message?: { tool_calls?: unknown; content?: unknown }
+    tool_calls?: unknown
+  }
+  const buckets: unknown[] = []
+  const fromMsg = root.message?.tool_calls
+  const fromRoot = root.tool_calls
+  if (Array.isArray(fromMsg)) buckets.push(...fromMsg)
+  if (Array.isArray(fromRoot)) buckets.push(...fromRoot)
+  const content = root.message?.content
+  if (Array.isArray(content)) {
+    for (const item of content) {
+      if (
+        item &&
+        typeof item === 'object' &&
+        ((item as { type?: string }).type === 'tool_call' ||
+          (item as { type?: string }).type === 'tool_use')
+      ) {
+        buckets.push(item)
+      }
+    }
+  }
+  const out: ChatToolCall[] = []
+  for (const raw of buckets) {
+    if (!raw || typeof raw !== 'object') continue
+    const o = raw as {
+      id?: string
+      name?: string
+      type?: string
+      function?: { name?: string; arguments?: unknown }
+      arguments?: unknown
+    }
+    const name = String(o.function?.name ?? o.name ?? '').trim()
+    if (!name) continue
+    const id =
+      String(o.id ?? '').trim() ||
+      `tool_${out.length + 1}`
+    out.push({
+      id,
+      name,
+      arguments: parseJsonObject(o.function?.arguments ?? o.arguments),
+    })
+  }
+  return out
+}
+
+export function cohereAssistantMessage(data: unknown): unknown {
+  const root = data as { message?: unknown }
+  return root.message ?? data
+}
+
+/**
+ * Un turno de chat con tools (Cohere v2). No ejecuta las tools:
+ * el caller corre el intérprete y reenvía resultados.
+ */
+export async function chatWithTools(opts: {
+  system: string
+  messages: ChatToolTurn[]
+  tools: ChatToolSpec[]
+  temperature?: number
+}): Promise<{
+  text: string
+  toolCalls: ChatToolCall[]
+  rawAssistant: unknown
+}> {
+  const apiKey = env('COHERE_API_KEY')
+  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
+  if (delayMs > 0) await delay(delayMs)
+  if (!apiKey) {
+    throw new Error('Falta COHERE_API_KEY en .env')
+  }
+
+  const model =
+    env('COHERE_MODEL') || env('COHERE_MODEL_FAST') || 'command-r-08-2024'
+
+  const res = await fetch('https://api.cohere.com/v2/chat', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: opts.temperature ?? 0.2,
+      tools: opts.tools,
+      messages: [
+        { role: 'system', content: opts.system },
+        ...opts.messages.map((m) => {
+          if (m.role === 'tool') {
+            return {
+              role: 'tool',
+              tool_call_id: m.tool_call_id,
+              content: m.content,
+            }
+          }
+          return m
+        }),
+      ],
+    }),
+  })
+
+  if (!res.ok) {
+    const errText = await res.text()
+    console.error('[cohere/sentinela] API error:', res.status, errText)
+    throw new Error(`Cohere chat falló (${res.status}): ${errText.slice(0, 240)}`)
+  }
+
+  const data = (await res.json()) as unknown
+  return {
+    text: chatTextFromCohere(data).trim(),
+    toolCalls: parseCohereToolCalls(data),
+    rawAssistant: cohereAssistantMessage(data),
+  }
+}

@@ -463,7 +463,7 @@ const NAMED: Record<number, NamedPower> = {
       'Metaanálisis + IDA.',
       'Agentes y poderes que se mejoran a sí mismos.',
     ),
-    agentIds: ['omnivoro-nucleo'],
+    agentIds: ['omnivoro-nucleo', 'sentinela'],
     typology: 'omnivoro',
   },
 }

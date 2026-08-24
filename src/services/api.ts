@@ -36,6 +36,7 @@ import type {
   ChatSession,
   ChatTipo,
   Entry,
+  AudioAnalysisPayload,
   EntityProposalView,
   LinkHarvest,
   Person,
@@ -81,7 +82,22 @@ import type {
   DialogoEntityRef,
   DialogoEntityRefType,
   DashboardPin,
+  SentinelAgent,
+  SentinelMission,
+  SentinelMessage,
+  SentinelEvent,
+  SentinelSkill,
 } from '../types'
+
+export type BackupApplyResult = {
+  ok: true
+  mode: 'replace' | 'merge'
+  tables: Record<string, number>
+  inserted: Record<string, number>
+  skipped: Record<string, number>
+  remapped: { trinchera: { from: string; to: string } | null }
+  media: { copied: number; skipped: number }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
@@ -110,6 +126,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ ok: boolean }>('/api/health'),
+
+  getLiveToken: () =>
+    request<{
+      access_token: string
+      expires_in: number
+      model: string
+      language: string
+    }>('/api/live/token'),
+
+  getLiveConfig: () =>
+    request<{
+      model: string
+      language: string
+      stream_path: string
+    }>('/api/live/config'),
 
   ingestAudio: (
     files: File[],
@@ -248,7 +279,16 @@ export const api = {
       method: 'DELETE',
     }),
 
-  getCribaAudios: () => request<{ entries: Entry[] }>('/api/entries/criba'),
+  getCribaAudios: () =>
+    request<{
+      entries: Entry[]
+      operator: { id: string; name: string } | null
+    }>('/api/entries/criba'),
+
+  getEntryAudioAnalysis: (entryId: string) =>
+    request<{ analysis: AudioAnalysisPayload; entry_id: string }>(
+      `/api/entries/${encodeURIComponent(entryId)}/analysis`,
+    ),
 
   getPendingProposals: () =>
     request<{ proposals: ProposalBundle[] }>('/api/proposals/pending'),
@@ -753,6 +793,7 @@ export const api = {
     kind?: import('../types').GeoKind | string
     aliases?: string[] | string
     notes?: string
+    parent_id?: string | null
   }) =>
     request<{ ok: boolean; place: import('../types').Geografia }>(
       '/api/geografia',
@@ -769,6 +810,9 @@ export const api = {
       kind?: import('../types').GeoKind | string
       aliases?: string[] | string
       notes?: string
+      parent_id?: string | null
+      human_weight?: number
+      capital_name?: string | null
     },
   ) =>
     request<{ ok: boolean; place: import('../types').Geografia }>(
@@ -789,6 +833,16 @@ export const api = {
     request<{ ok: boolean; id: string }>(`/api/geografia/${id}`, {
       method: 'DELETE',
     }),
+
+  listGeografiaTree: () =>
+    request<{ tree: import('../types').GeografiaTreeNode[] }>(
+      '/api/geografia/tree',
+    ),
+
+  getGeografiaMap: (id: string) =>
+    request<import('../types').GeografiaMapPayload>(
+      `/api/geografia/${id}/map`,
+    ),
 
   // —— Proyectos ——
   listProjects: () =>
@@ -1073,11 +1127,12 @@ export const api = {
     }),
 
   // —— Quántomos ——
-  listQuantomos: () =>
+  listQuantomos: (stage?: 'proto' | 'pre' | 'sealed' | 'premium' | 'all') =>
     request<{
       count: number
       avg_weight: number | null
       universes: Array<{ name: string; count: number }>
+      stage?: string
       quantomos: Array<
         Quantomo & {
           entry_title: string
@@ -1087,7 +1142,58 @@ export const api = {
           entry_created_at: string
         }
       >
-    }>('/api/quantomos'),
+    }>(`/api/quantomos${stage ? `?stage=${stage}` : ''}`),
+
+  getQuantomoChest: () =>
+    request<{
+      ok: boolean
+      open_threads: Array<{
+        id: string
+        title: string
+        updated_at: string
+        status: string
+        hermetic_weight: number | null
+      }>
+      proto: Quantomo[]
+      pre: Quantomo[]
+      sealed: number
+      premium: number
+    }>('/api/quantomos/chest'),
+
+  promoteQuantomoPre: (
+    id: string,
+    body?: {
+      universe?: string | null
+      profile?: Record<string, unknown>
+      calendar?: Record<string, unknown>
+    },
+  ) =>
+    request<{ ok: boolean; quantomo: Quantomo }>(
+      `/api/quantomos/${id}/promote-pre`,
+      { method: 'POST', body: JSON.stringify(body ?? {}) },
+    ),
+
+  sealQuantomo: (id: string) =>
+    request<{ ok: boolean; quantomo: Quantomo }>(`/api/quantomos/${id}/seal`, {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  getQuantomoLattice: (id: string) =>
+    request<{
+      ok: boolean
+      quantomo: Quantomo
+      packet: Record<string, unknown> | null
+      canonical: number[] | null
+      domain_energies: number[]
+      seal_ok: boolean
+    }>(`/api/quantomos/${id}/lattice`),
+
+  resonateQuantomo: (id: string) =>
+    request<{
+      ok: boolean
+      neighbors: Array<{ id: string; title: string; score: number; stage: string }>
+    }>(`/api/quantomos/${id}/resonate`),
 
   getQuantomo: (id: string) =>
     request<{
@@ -1857,12 +1963,17 @@ export const api = {
         day_count: number
       } | null
       tables: Record<string, number>
+      vault_files: number
+      vault_bytes: number
+      feedback_files: number
+      feedback_bytes: number
       groups: {
         transcripciones: number
         perfiles: number
         conexiones: number
         quantomos: number
         validaciones: number
+        ida: number
         resto: number
       }
     }>('/api/backup/summary'),
@@ -1889,10 +2000,19 @@ export const api = {
   restoreBackup: (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return request<{ ok: true; tables: Record<string, number> }>(
-      '/api/backup/restore',
-      { method: 'POST', body: form },
-    )
+    return request<BackupApplyResult>('/api/backup/restore', {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  mergeBackup: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<BackupApplyResult>('/api/backup/merge', {
+      method: 'POST',
+      body: form,
+    })
   },
 
   amazonaOverview: () =>
@@ -2590,6 +2710,18 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  closeDialogoThread: (id: string, hermeticWeight: number, title?: string) =>
+    request<{
+      ok: boolean
+      thread_id: string
+      entry_id: string
+      weight: number
+      proto: Array<{ id: string; title: string }>
+    }>(`/api/dialogo/threads/${id}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ hermetic_weight: hermeticWeight, title }),
+    }),
+
   listDashboardPins: () =>
     request<{ ok: boolean; pins: DashboardPin[] }>('/api/dialogo/pins'),
 
@@ -2605,6 +2737,86 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ pins }),
     }),
+
+  listSentinelAgents: () =>
+    request<{ ok: boolean; agents: SentinelAgent[] }>('/api/sentinela/agents'),
+
+  createSentinelAgent: () =>
+    request<{ ok: boolean; agent: SentinelAgent }>('/api/sentinela/agents', {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  getSentinelAgent: (id: string) =>
+    request<{
+      ok: boolean
+      agent: SentinelAgent
+      missions: SentinelMission[]
+      skills: SentinelSkill[]
+      events: SentinelEvent[]
+      messages: SentinelMessage[]
+    }>(`/api/sentinela/agents/${id}`),
+
+  abortSentinelInspect: (id: string) =>
+    request<{ ok: boolean; agent: SentinelAgent }>(
+      `/api/sentinela/agents/${id}/abort`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  createSentinelMission: (
+    agentId: string,
+    body: {
+      instructions: string
+      expected_output?: string
+      resources?: string[]
+    },
+  ) =>
+    request<{ ok: boolean; mission: SentinelMission }>(
+      `/api/sentinela/agents/${agentId}/missions`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  postSentinelMissionMessage: (missionId: string, content: string) =>
+    request<{ ok: boolean; mission: SentinelMission }>(
+      `/api/sentinela/missions/${missionId}/messages`,
+      { method: 'POST', body: JSON.stringify({ content }) },
+    ),
+
+  pauseSentinelMission: (missionId: string) =>
+    request<{ ok: boolean; mission: SentinelMission }>(
+      `/api/sentinela/missions/${missionId}/pause`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  resumeSentinelMission: (missionId: string) =>
+    request<{ ok: boolean; mission: SentinelMission }>(
+      `/api/sentinela/missions/${missionId}/resume`,
+      { method: 'POST', body: '{}' },
+    ),
+
+  patchSentinelMission: (
+    missionId: string,
+    body: { instructions?: string; expected_output?: string },
+  ) =>
+    request<{ ok: boolean; mission: SentinelMission }>(
+      `/api/sentinela/missions/${missionId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  acceptSentinelSkill: (
+    skillId: string,
+    body?: { weight?: number; promote_ida?: boolean },
+  ) =>
+    request<{ ok: boolean; skill: SentinelSkill }>(
+      `/api/sentinela/skills/${skillId}/accept`,
+      { method: 'POST', body: JSON.stringify(body ?? {}) },
+    ),
+
+  rejectSentinelSkill: (skillId: string) =>
+    request<{ ok: boolean; skill: SentinelSkill }>(
+      `/api/sentinela/skills/${skillId}/reject`,
+      { method: 'POST', body: '{}' },
+    ),
 }
 
 export type { Entry, ProposalBundle, Person, Project, EntityProposalView }

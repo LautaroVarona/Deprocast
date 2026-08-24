@@ -9,6 +9,7 @@ import {
   toDayKey,
 } from '../../lib/calendar/engine'
 import { moonPhase } from '../../lib/map/zones'
+import { CastilloSealPanel } from './QuantomoPipePanels'
 
 type TideNode = {
   id: string
@@ -154,6 +155,7 @@ export function CastilloView({
             })}
           </ul>
         </section>
+        <CastilloSealPanel />
       </aside>
     </div>
   )

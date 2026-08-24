@@ -235,6 +235,23 @@ export const AGENT_CATALOG: DeproAgent[] = [
     notes: 'La memoria de largo plazo. Alimenta el retrieve del Oráculo.',
   },
   {
+    id: 'sentinela',
+    name: 'Sentinela',
+    typology: 'omnivoro',
+    contract: ipo(
+      'Nacimiento (MD + catálogos + censo) o comando escrito de misión.',
+      'Inspección → perfil; luego loop de tools allowlist + RAG (quántomos, perfil, skills, docs).',
+      'Notas, cuellos de tiempo, skills en borrador HITL. No reescribe TypeScript.',
+    ),
+    domains: ['memoria'],
+    powerIndexes: [71],
+    module: 'sentinela',
+    idaStage: 'aplicacion',
+    status: 'vivo',
+    promptStub: 'chatWithTools',
+    notes: 'Vista Sentinela. Ver server/prompts/alma-sentinela.md.',
+  },
+  {
     id: 'tejedor',
     name: 'Tejedor',
     typology: 'crawler',

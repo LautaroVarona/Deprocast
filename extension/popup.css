@@ -1,0 +1,157 @@
+:root {
+  --bg: #0e1012;
+  --panel: #16191d;
+  --line: #2a3139;
+  --alabaster: #e8e4dc;
+  --dim: #b7b2a8;
+  --accent: #c4a35a;
+  --danger: #c45c4a;
+  --ok: #6a9e7a;
+  --mono: ui-monospace, 'IBM Plex Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 340px;
+  padding: 14px 14px 12px;
+  background: radial-gradient(ellipse 80% 50% at 10% -10%, #1a1f26 0%, transparent 55%),
+    #0e1012;
+  color: var(--alabaster);
+  font: 12.5px/1.45 var(--mono);
+}
+
+header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.mark {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--line);
+  box-shadow: 0 0 0 3px #1c2127;
+  flex-shrink: 0;
+}
+
+.mark.live {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px rgba(196, 92, 74, 0.25);
+}
+
+.mark.ok {
+  background: var(--ok);
+}
+
+.mark.warn {
+  background: var(--accent);
+}
+
+h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.sub,
+.health,
+.hint,
+.status {
+  margin: 0;
+  color: var(--dim);
+}
+
+.health.down {
+  color: var(--danger);
+}
+
+.health.up {
+  color: var(--ok);
+}
+
+.status {
+  margin-bottom: 8px;
+}
+
+.error {
+  margin: 0 0 10px;
+  color: var(--danger);
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 12px;
+  color: var(--alabaster);
+  cursor: pointer;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  flex: 1;
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--alabaster);
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  border-color: var(--accent-dim, #8a7340);
+  color: var(--accent);
+}
+
+button.danger {
+  width: 100%;
+  margin-top: 8px;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+#btn-retry {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.hint {
+  margin-top: 12px;
+  font-size: 11px;
+  line-height: 1.4;
+}

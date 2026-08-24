@@ -16,6 +16,7 @@ const SYSTEM_KEY = 'deprocast.map.system'
 type Props = {
   refreshKey: number
   onChanged?: () => void
+  onOpenAtlas?: () => void
 }
 
 function cameraFromOverview(data: MapOverview): MapCamera {
@@ -28,7 +29,7 @@ function cameraFromOverview(data: MapOverview): MapCamera {
   }
 }
 
-export function MapaSection({ refreshKey, onChanged }: Props) {
+export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
   const mapRef = useRef<MapRef | null>(null)
   const [data, setData] = useState<MapOverview | null>(null)
   const [systemId, setSystemId] = useState(
@@ -293,6 +294,11 @@ export function MapaSection({ refreshKey, onChanged }: Props) {
           <button type="button" className="btn btn-tiny" onClick={flyHome}>
             Home
           </button>
+          {onOpenAtlas ? (
+            <button type="button" className="btn btn-tiny" onClick={onOpenAtlas}>
+              Atlas
+            </button>
+          ) : null}
         </div>
       </header>
       {error ? <p className="mapa-error">{error}</p> : null}

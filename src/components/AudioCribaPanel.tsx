@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { formatDuration, useSmartAudioPlayback } from '../hooks/useSmartAudioPlayback'
 import { api } from '../services/api'
 import type {
+  AudioAnalysisPayload,
   BookmarkManualTag,
   DiarizationPayload,
   Entry,
@@ -12,6 +14,8 @@ type Props = {
   refreshKey: number
   onChanged: () => void
 }
+
+type OperatorInfo = { id: string; name: string }
 
 function keyToWeight(e: KeyboardEvent): number | null {
   const k = e.key
@@ -80,26 +84,148 @@ function parseDiarization(raw: string | null | undefined): DiarizationPayload | 
   }
 }
 
+function parseAnalysis(raw: string | null | undefined): AudioAnalysisPayload | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as AudioAnalysisPayload
+    if (!parsed || !Array.isArray(parsed.speech_regions)) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function AudioTimeline({
+  analysis,
+  currentTime,
+  onSeek,
+}: {
+  analysis: AudioAnalysisPayload
+  currentTime: number
+  onSeek: (sec: number) => void
+}) {
+  const total =
+    analysis.duration_sec ??
+    Math.max(
+      0,
+      ...analysis.speech_regions.map((r) => r.end),
+      ...analysis.silence_regions.map((r) => r.end),
+    )
+  if (total <= 0) return null
+
+  const segments = useMemo(() => {
+    type Seg = { start: number; end: number; kind: 'speech' | 'silence' }
+    const merged: Seg[] = [
+      ...analysis.speech_regions.map((r) => ({
+        start: r.start,
+        end: r.end,
+        kind: 'speech' as const,
+      })),
+      ...analysis.silence_regions.map((r) => ({
+        start: r.start,
+        end: r.end,
+        kind: 'silence' as const,
+      })),
+    ].sort((a, b) => a.start - b.start)
+    return merged
+  }, [analysis])
+
+  const playheadPct = Math.min(100, Math.max(0, (currentTime / total) * 100))
+
+  return (
+    <div
+      className="audio-timeline"
+      role="slider"
+      aria-label="Línea de tiempo del audio"
+      aria-valuemin={0}
+      aria-valuemax={total}
+      aria-valuenow={currentTime}
+      onClick={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect()
+        const ratio = (e.clientX - rect.left) / rect.width
+        onSeek(Math.max(0, Math.min(total, ratio * total)))
+      }}
+    >
+      <div className="audio-timeline-track">
+        {segments.map((seg, i) => {
+          const widthPct = ((seg.end - seg.start) / total) * 100
+          const leftPct = (seg.start / total) * 100
+          return (
+            <div
+              key={`${seg.kind}-${seg.start}-${i}`}
+              className={`audio-timeline-seg is-${seg.kind}`}
+              style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+            />
+          )
+        })}
+        <div className="audio-timeline-playhead" style={{ left: `${playheadPct}%` }} />
+      </div>
+    </div>
+  )
+}
+
 export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
   const [entries, setEntries] = useState<Entry[]>([])
+  const [operator, setOperator] = useState<OperatorInfo | null>(null)
   const [idx, setIdx] = useState(0)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [analysisBusy, setAnalysisBusy] = useState(false)
   const [title, setTitle] = useState('')
   const [timestamp, setTimestamp] = useState('')
   const [transcript, setTranscript] = useState('')
   const [note, setNote] = useState('')
   const [tags, setTags] = useState<BookmarkManualTag[]>([])
   const [speakers, setSpeakers] = useState<SpeakerAssignment[]>([])
+  const [analysis, setAnalysis] = useState<AudioAnalysisPayload | null>(null)
 
   const audioRef = useRef<HTMLAudioElement>(null)
   const loadInFlight = useRef(false)
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeRef = useRef<Entry | null>(null)
+  const analysisRequested = useRef<string | null>(null)
 
   const active = entries[idx] ?? null
   activeRef.current = active
+
+  const diarization = useMemo(
+    () => parseDiarization(active?.diarization_json),
+    [active?.diarization_json],
+  )
+
+  const requestAnalysis = useCallback(async () => {
+    const entry = activeRef.current
+    if (!entry || analysisBusy) return
+    if (analysisRequested.current === entry.id) return
+    analysisRequested.current = entry.id
+    setAnalysisBusy(true)
+    try {
+      const { analysis: next } = await api.getEntryAudioAnalysis(entry.id)
+      setAnalysis(next)
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === entry.id
+            ? {
+                ...e,
+                audio_analysis_json: JSON.stringify(next),
+                duration_sec: next.duration_sec ?? e.duration_sec,
+              }
+            : e,
+        ),
+      )
+    } catch {
+      analysisRequested.current = null
+    } finally {
+      setAnalysisBusy(false)
+    }
+  }, [analysisBusy])
+
+  const playback = useSmartAudioPlayback(audioRef, {
+    analysis,
+    entryId: active?.id ?? null,
+    onRequestAnalysis: () => void requestAnalysis(),
+  })
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     if (loadInFlight.current) return
@@ -109,6 +235,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     try {
       const data = await api.getCribaAudios()
       setEntries(data.entries)
+      setOperator(data.operator)
       setIdx((prev) => {
         if (data.entries.length === 0) return 0
         const keepId = activeRef.current?.id
@@ -137,6 +264,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
   }, [load])
 
   useEffect(() => {
+    analysisRequested.current = null
     if (!active) {
       setTitle('')
       setTimestamp('')
@@ -144,6 +272,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
       setNote('')
       setTags([])
       setSpeakers([])
+      setAnalysis(null)
       return
     }
     setTitle(active.title)
@@ -151,6 +280,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     setTranscript(active.content_raw ?? '')
     setNote(active.operator_note ?? '')
     setTags(parseTags(active.manual_tags))
+    setAnalysis(parseAnalysis(active.audio_analysis_json))
     const mapped = parseSpeakerMap(active.speaker_map)
     const dia = parseDiarization(active.diarization_json)
     if (mapped.length > 0) {
@@ -172,6 +302,17 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     () => tags.filter((t) => t.kind === 'person'),
     [tags],
   )
+
+  const operatorTag = useMemo((): BookmarkManualTag | null => {
+    if (!operator) return null
+    return { kind: 'person', entity_id: operator.id, entity_name: operator.name }
+  }, [operator])
+
+  const suggestOperatorForSpeaker = useMemo(() => {
+    if (!operator || speakers.length !== 1) return false
+    const s = speakers[0]
+    return !s?.person_id
+  }, [operator, speakers])
 
   const cribaPatch = useCallback(
     (entry: Entry) => ({
@@ -257,6 +398,18 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
       const tag = t?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (t?.isContentEditable) return
+
+      if (e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') {
+        e.preventDefault()
+        playback.nextSegment()
+        return
+      }
+      if (e.key === 'ArrowLeft' || e.key === 'p' || e.key === 'P') {
+        e.preventDefault()
+        playback.prevSegment()
+        return
+      }
+
       const w = keyToWeight(e)
       if (w == null) return
       e.preventDefault()
@@ -264,7 +417,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [vote])
+  }, [vote, playback])
 
   function assignSpeaker(speaker: number, tag: BookmarkManualTag | null) {
     setSpeakers((prev) =>
@@ -333,12 +486,90 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
       {error && <p className="status-line err">{error}</p>}
 
       <div className="audio-criba-player">
-        <audio
-          ref={audioRef}
-          key={active.id}
-          controls
-          src={`/api/entries/${encodeURIComponent(active.id)}/media`}
-        />
+        <audio ref={audioRef} key={active.id} controls preload="metadata" />
+        <div className="audio-criba-player-tools">
+          <label className="audio-criba-toggle">
+            <input
+              type="checkbox"
+              checked={playback.skipSilence}
+              onChange={(e) => playback.setSkipSilence(e.target.checked)}
+            />
+            Saltar silencios
+          </label>
+          <label className="audio-criba-toggle">
+            <input
+              type="checkbox"
+              checked={playback.enhanced}
+              disabled={playback.enhancing}
+              onChange={(e) => playback.setEnhanced(e.target.checked)}
+            />
+            Audio mejorado
+            {playback.enhancing ? '…' : ''}
+          </label>
+          <button
+            type="button"
+            className="btn btn-tiny"
+            onClick={() => playback.prevSegment()}
+            title="Segmento anterior (← / p)"
+          >
+            ‹ Seg
+          </button>
+          <button
+            type="button"
+            className="btn btn-tiny"
+            onClick={() => playback.nextSegment()}
+            title="Siguiente segmento (→ / n)"
+          >
+            Seg ›
+          </button>
+          <span className="audio-criba-durations mono">
+            {playback.speechDurationLabel} habla / {playback.totalDurationLabel} total
+          </span>
+          {!analysis && (
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={analysisBusy}
+              onClick={() => void requestAnalysis()}
+            >
+              {analysisBusy ? 'Analizando…' : 'Analizar silencios'}
+            </button>
+          )}
+        </div>
+        {analysis ? (
+          <AudioTimeline
+            analysis={analysis}
+            currentTime={playback.currentTime}
+            onSeek={playback.seekTo}
+          />
+        ) : null}
+        {diarization && diarization.utterances.length > 0 ? (
+          <ul className="audio-utterance-list">
+            {diarization.utterances.map((u, i) => {
+              const activeUtterance =
+                playback.currentTime >= u.start && playback.currentTime < u.end
+              return (
+                <li key={`${u.start}-${i}`}>
+                  <button
+                    type="button"
+                    className={
+                      activeUtterance
+                        ? 'audio-utterance-btn is-active'
+                        : 'audio-utterance-btn'
+                    }
+                    onClick={() => playback.seekTo(u.start)}
+                  >
+                    <span className="mono audio-utterance-ts">
+                      {formatDuration(u.start)}
+                    </span>
+                    <span className="mono">S{u.speaker}</span>
+                    <span className="audio-utterance-text">{u.transcript}</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        ) : null}
       </div>
 
       <div className="audio-criba-main">
@@ -361,6 +592,11 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
                   <span className="mono">Speaker {s.speaker}</span>
                   <span className="audio-speaker-name">
                     {s.person_name ?? 'sin asignar'}
+                    {suggestOperatorForSpeaker &&
+                    s.speaker === speakers[0]?.speaker &&
+                    !s.person_id ? (
+                      <span className="audio-speaker-suggested"> sugerido</span>
+                    ) : null}
                   </span>
                   <button
                     type="button"
@@ -369,6 +605,23 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
                   >
                     —
                   </button>
+                  {operatorTag ? (
+                    <button
+                      type="button"
+                      className={
+                        s.person_id === operatorTag.entity_id
+                          ? 'btn btn-tiny is-on'
+                          : suggestOperatorForSpeaker &&
+                              s.speaker === speakers[0]?.speaker &&
+                              !s.person_id
+                            ? 'btn btn-tiny is-suggested'
+                            : 'btn btn-tiny'
+                      }
+                      onClick={() => assignSpeaker(s.speaker, operatorTag)}
+                    >
+                      Yo — {operatorTag.entity_name}
+                    </button>
+                  ) : null}
                   {personTags.map((tag) => (
                     <button
                       key={tag.entity_id}

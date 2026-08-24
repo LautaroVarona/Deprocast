@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { getDb, getTrincheraNotebookId } from '../db.js'
 import { resolveOriginAttribution } from '../services/originAttribution.js'
 import { ingestBlob } from '../services/blobIngest.js'
+import { ingestCofre } from '../services/cofreIngest.js'
 
 const VAULT_ROOT = path.resolve(process.cwd(), 'vault')
 const INCOMING = path.join(VAULT_ROOT, '_incoming')
@@ -191,6 +192,65 @@ ingestRouter.post('/audio', (req, res) => {
       console.error('[ingest]', e)
       res.status(500).json({ error: 'Error al ingerir audio' })
     }
+  })
+})
+
+ingestRouter.post('/cofre', (req, res) => {
+  upload.single('audio')(req, res, (err: unknown) => {
+    if (err) {
+      console.error('[ingest/cofre] multer:', err)
+      const message =
+        err instanceof multer.MulterError
+          ? err.code === 'LIMIT_FILE_SIZE'
+            ? 'Archivo demasiado grande (máx. 512 MB)'
+            : err.message
+          : err instanceof Error
+            ? err.message
+            : 'Error al subir el Cofre'
+      res.status(400).json({ error: message })
+      return
+    }
+
+    const file = req.file
+    if (!file) {
+      res.status(400).json({ error: 'Falta el archivo audio' })
+      return
+    }
+
+    const body = req.body as { manifest?: unknown }
+    const manifestRaw =
+      typeof body.manifest === 'string' ? body.manifest : ''
+    if (!manifestRaw.trim()) {
+      try {
+        if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
+      } catch {
+        /* ignore */
+      }
+      res.status(400).json({ error: 'Falta el campo manifest' })
+      return
+    }
+
+    void ingestCofre({
+      audioPath: file.path,
+      originalFilename: Buffer.from(file.originalname, 'latin1').toString(
+        'utf8',
+      ),
+      manifestRaw,
+    })
+      .then((entry) => {
+        res.json({ ok: true, ...entry })
+      })
+      .catch((e: unknown) => {
+        console.error('[ingest/cofre]', e)
+        try {
+          if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
+        } catch {
+          /* ignore */
+        }
+        const message =
+          e instanceof Error ? e.message : 'Error al ingerir El Cofre'
+        res.status(500).json({ error: message })
+      })
   })
 })
 

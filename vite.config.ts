@@ -12,6 +12,10 @@ export default defineConfig({
       '@deck.gl/layers',
       '@deck.gl/geo-layers',
       '@deck.gl/mapbox',
+      'three',
+      '@react-three/fiber',
+      '@react-three/drei',
+      'three-stdlib',
     ],
     esbuildOptions: {
       target: 'es2022',
@@ -26,6 +30,7 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3001',
         changeOrigin: true,
+        ws: true,
         // Uploads grandes (m4a 100–200 MB): sin timeout del proxy
         timeout: 0,
         proxyTimeout: 0,

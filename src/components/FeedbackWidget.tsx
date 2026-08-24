@@ -3,7 +3,9 @@ import { api } from '../services/api'
 import { getClientLogs } from '../lib/clientLogs'
 
 const VIEW_LABELS: Record<string, string> = {
+  dashboard: 'Dashboard',
   franca: 'Zona franca',
+  directo: 'Directo',
   aduana: 'Aduana',
   validada: 'Validada',
   entidades: 'Entidades',
@@ -12,10 +14,12 @@ const VIEW_LABELS: Record<string, string> = {
   criba: 'Criba',
   biblioteca: 'Biblioteca',
   chats: 'Chats',
+  dialogo: 'Diálogo',
   respaldo: 'Respaldo',
   calendario: 'Calendario',
   amazona: 'AmazonA',
   mapa: 'Mapa',
+  aleph: 'Aleph',
   deprocast: 'Núcleo Deprocast',
 }
 

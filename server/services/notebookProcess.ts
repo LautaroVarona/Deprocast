@@ -12,7 +12,6 @@ import { ocrNotebookPage } from './notebookOcr.js'
 import { collectNotebookExplainContext } from './notebookSources.js'
 import { getPage, listPages, rebuildNotebookIndex } from './notebookPages.js'
 import { createEntityProposalsFromEntry } from './entityMatch.js'
-import { embedApprovedEntry, enqueueEmbed } from './embeddings.js'
 import {
   applyEntityMentionTags,
   type BlobTag,
@@ -907,7 +906,7 @@ export async function confirmNotebookPage(
       ).run(title, contentRaw, weight, entryId)
       db.prepare(
         `UPDATE quantomos SET title = ?, content = ?, hermetic_weight = ?,
-         human_weight = ?, suggested_weight = ?, recognized = 1, universe = 'cuaderno'
+         human_weight = ?, suggested_weight = ?, recognized = 0, stage = 'pre', universe = 'cuaderno'
          WHERE id = ?`,
       ).run(title, explanation, weight, weight, weight, quantomoId)
       db.prepare(`DELETE FROM entry_entities_raw WHERE entry_id = ?`).run(
@@ -938,7 +937,7 @@ export async function confirmNotebookPage(
         `INSERT INTO quantomos (
           id, entry_id, title, content, hermetic_weight, universe, recognized,
           human_weight, suggested_weight
-        ) VALUES (?, ?, ?, ?, ?, 'cuaderno', 1, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, 'cuaderno', 0, ?, ?)`,
       ).run(quantomoId, entryId, title, explanation, weight, weight, weight)
     }
 
@@ -999,8 +998,6 @@ export async function confirmNotebookPage(
     db.exec('ROLLBACK')
     throw err
   }
-
-  enqueueEmbed(() => embedApprovedEntry(entryId))
 
   const updated = row<NotebookPage>(
     db

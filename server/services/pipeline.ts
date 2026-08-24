@@ -12,6 +12,12 @@ import {
 } from './originAttribution.js'
 import { splitAudioIfLong } from './audioSplit.js'
 import {
+  analyzeAudioSilence,
+  enhanceAudio,
+  enhanceOnIngest,
+  enhancedAudioPath,
+} from './audioAnalysis.js'
+import {
   applyEntryManualTagsAsLinks,
   applySpeakerLinks,
   findRuidoPersonId,
@@ -526,18 +532,57 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
     }
   })
 
+  let audioAnalysisJson: string | null = null
+  let analysisDuration: number | null = null
+  try {
+    const analysis = await analyzeAudioSilence(absPath, utterances)
+    if (analysis) {
+      audioAnalysisJson = JSON.stringify(analysis)
+      analysisDuration = analysis.duration_sec
+    }
+  } catch (err) {
+    console.warn(`[pipeline] ${entryId} audio analysis:`, err)
+  }
+
   db.prepare(
     `UPDATE entries SET
        content_raw = ?, timestamp_exact = ?, status = 'pending_criba',
-       diarization_json = ?, speaker_map = ?
+       diarization_json = ?, speaker_map = ?,
+       audio_analysis_json = COALESCE(?, audio_analysis_json),
+       duration_sec = COALESCE(?, duration_sec)
      WHERE id = ?`,
   ).run(
     text,
     timestampExact,
     JSON.stringify(payload),
     JSON.stringify(speakerMap),
+    audioAnalysisJson,
+    analysisDuration,
     entryId,
   )
+
+  if (enhanceOnIngest() && entry.vault_path) {
+    const out = enhancedAudioPath(entry.vault_path)
+    void enhanceAudio(absPath, out).then((ok) => {
+      if (!ok) return
+      const row = db
+        .prepare(`SELECT audio_analysis_json FROM entries WHERE id = ?`)
+        .get(entryId) as { audio_analysis_json: string | null } | undefined
+      if (!row?.audio_analysis_json) return
+      try {
+        const parsed = JSON.parse(row.audio_analysis_json) as Record<
+          string,
+          unknown
+        >
+        parsed.enhanced_available = true
+        db.prepare(
+          `UPDATE entries SET audio_analysis_json = ? WHERE id = ?`,
+        ).run(JSON.stringify(parsed), entryId)
+      } catch {
+        /* ignore */
+      }
+    })
+  }
 
   setLiveStage('done', `Listo para criba · «${entry.title}»`, {
     currentTitle: entry.title,

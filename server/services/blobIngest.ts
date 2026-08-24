@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { getDb, getTrincheraNotebookId } from '../db.js'
 import { row, rows } from '../sql.js'
 import { clampTitleWords } from './titleUtils.js'
-import { embedApprovedEntry, enqueueEmbed } from './embeddings.js'
+import { enqueueEmbed } from './embeddings.js'
 import { extractFromTranscript } from './cohere.js'
 import type { CohereQuantomo } from '../types.js'
 
@@ -325,7 +325,7 @@ export function ingestBlob(input: {
       `INSERT INTO quantomos (
         id, entry_id, title, content, hermetic_weight, universe, recognized,
         human_weight, suggested_weight
-      ) VALUES (?, ?, ?, ?, ?, 'nota', 1, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, 'nota', 0, ?, ?)`,
     ).run(
       quantomoId,
       entryId,
@@ -379,7 +379,7 @@ export function ingestBlob(input: {
               `INSERT INTO quantomos (
                 id, entry_id, title, content, hermetic_weight, universe, recognized,
                 human_weight, suggested_weight
-              ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+              ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
             )
             .run(
               randomUUID(),
@@ -396,7 +396,6 @@ export function ingestBlob(input: {
     } catch (err) {
       console.warn('[blob] extract quantomo:', err)
     }
-    await embedApprovedEntry(entryId)
   })
 
   return toView({

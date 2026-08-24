@@ -29,10 +29,6 @@ import {
   findBestProjectMatch,
 } from './entityMatch.js'
 import {
-  embedApprovedEntry,
-  enqueueEmbed,
-} from './embeddings.js'
-import {
   ensureReelMedia,
   extractFramesEveryNSeconds,
   hasFfmpeg,
@@ -1227,7 +1223,9 @@ export function approveBookmarkQuantomos(ids?: string[]): {
 
   if (wanted.length === 0) return { approved: 0, entryIds: [] }
 
-  const upd = db.prepare(`UPDATE quantomos SET recognized = 1 WHERE id = ?`)
+  const upd = db.prepare(
+    `UPDATE quantomos SET recognized = 0, stage = 'proto', source_kind = coalesce(source_kind, 'bookmark') WHERE id = ?`,
+  )
   const entryIds: string[] = []
   db.exec('BEGIN')
   try {
@@ -1239,10 +1237,6 @@ export function approveBookmarkQuantomos(ids?: string[]): {
   } catch (err) {
     db.exec('ROLLBACK')
     throw err
-  }
-
-  for (const entryId of [...new Set(entryIds)]) {
-    enqueueEmbed(() => embedApprovedEntry(entryId))
   }
 
   return { approved: wanted.length, entryIds: [...new Set(entryIds)] }

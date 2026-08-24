@@ -1,17 +1,20 @@
 import { Router } from 'express'
 import { getDb } from '../db.js'
-import { rows, row } from '../sql.js'
+import { row, rows } from '../sql.js'
+import {
+  chestSnapshot,
+  getLatticeView,
+  listQuantomosByStage,
+  promoteToPre,
+  resonateQuantomo,
+  sealQuantomo,
+  type QuantomoStageRow,
+} from '../services/quantomoStages.js'
+import type { QuantomoStage } from '../services/lattice72.js'
 
 export const quantomosRouter = Router()
 
-export type QuantomoView = {
-  id: string
-  entry_id: string
-  title: string
-  content: string | null
-  hermetic_weight: number | null
-  universe: string | null
-  recognized: number
+export type QuantomoView = QuantomoStageRow & {
   entry_title: string
   entry_status: string
   timestamp_exact: string | null
@@ -19,23 +22,7 @@ export type QuantomoView = {
   entry_created_at: string
 }
 
-quantomosRouter.get('/', (_req, res) => {
-  const db = getDb()
-  const quantomos = rows<QuantomoView>(
-    db
-      .prepare(
-        `SELECT q.id, q.entry_id, q.title, q.content, q.hermetic_weight,
-                q.universe, q.recognized,
-                e.title as entry_title, e.status as entry_status,
-                e.timestamp_exact, e.original_filename, e.created_at as entry_created_at
-         FROM quantomos q
-         JOIN entries e ON e.id = q.entry_id
-         WHERE q.recognized = 1 AND e.status = 'approved'
-         ORDER BY q.hermetic_weight DESC, e.timestamp_exact DESC, e.created_at DESC`,
-      )
-      .all(),
-  )
-
+function universeStats(quantomos: QuantomoStageRow[]) {
   const byUniverse = new Map<string, number>()
   let weightSum = 0
   let weightN = 0
@@ -47,51 +34,118 @@ quantomosRouter.get('/', (_req, res) => {
       weightN += 1
     }
   }
-
   const universes = [...byUniverse.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-
-  res.json({
+  return {
     count: quantomos.length,
     avg_weight:
       weightN > 0 ? Math.round((weightSum / weightN) * 100) / 100 : null,
     universes,
+  }
+}
+
+quantomosRouter.get('/', (req, res) => {
+  const stageRaw = String(req.query.stage ?? 'sealed')
+  const stage = (
+    ['proto', 'pre', 'sealed', 'premium', 'all'].includes(stageRaw)
+      ? stageRaw
+      : 'sealed'
+  ) as QuantomoStage | 'premium' | 'all'
+  const quantomos = listQuantomosByStage(stage)
+  res.json({
+    stage,
+    ...universeStats(quantomos),
     quantomos,
   })
 })
 
+quantomosRouter.get('/chest', (_req, res) => {
+  try {
+    res.json({ ok: true, ...chestSnapshot() })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
+quantomosRouter.get('/:id/lattice', (req, res) => {
+  try {
+    res.json({ ok: true, ...getLatticeView(String(req.params.id)) })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(msg.includes('no encontrado') ? 404 : 500).json({ error: msg })
+  }
+})
+
+quantomosRouter.get('/:id/resonate', (req, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 8)
+    res.json({
+      ok: true,
+      neighbors: resonateQuantomo(String(req.params.id), limit),
+    })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
+quantomosRouter.post('/:id/promote-pre', (req, res) => {
+  try {
+    const body = (req.body ?? {}) as {
+      universe?: string | null
+      profile?: Record<string, unknown>
+      calendar?: Record<string, unknown>
+    }
+    const quantomo = promoteToPre(String(req.params.id), body)
+    res.json({ ok: true, quantomo })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: msg })
+  }
+})
+
+quantomosRouter.post('/:id/seal', (req, res) => {
+  try {
+    const quantomo = sealQuantomo(String(req.params.id))
+    res.json({ ok: true, quantomo })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: msg })
+  }
+})
+
 quantomosRouter.get('/:id', (req, res) => {
   const db = getDb()
-  const quantomo = row<QuantomoView>(
-    db
-      .prepare(
-        `SELECT q.id, q.entry_id, q.title, q.content, q.hermetic_weight,
-                q.universe, q.recognized,
-                e.title as entry_title, e.status as entry_status,
-                e.timestamp_exact, e.original_filename, e.created_at as entry_created_at
-         FROM quantomos q
-         JOIN entries e ON e.id = q.entry_id
-         WHERE q.id = ?`,
-      )
-      .get(req.params.id),
-  )
+  const all = listQuantomosByStage('all')
+  const quantomo = all.find((q) => q.id === req.params.id)
   if (!quantomo) {
     res.status(404).json({ error: 'Quántomo no encontrado' })
     return
   }
 
   const siblings = rows<
-    Pick<QuantomoView, 'id' | 'title' | 'hermetic_weight' | 'universe'>
+    Pick<QuantomoStageRow, 'id' | 'title' | 'hermetic_weight' | 'universe' | 'stage'>
   >(
     db
       .prepare(
-        `SELECT id, title, hermetic_weight, universe FROM quantomos
-         WHERE entry_id = ? AND recognized = 1 AND id != ?
+        `SELECT id, title, hermetic_weight, universe, coalesce(stage, 'proto') AS stage
+         FROM quantomos
+         WHERE entry_id = ? AND id != ?
          ORDER BY hermetic_weight DESC`,
       )
       .all(quantomo.entry_id, quantomo.id),
   )
 
-  res.json({ quantomo, siblings })
+  let lattice = null
+  try {
+    lattice = getLatticeView(quantomo.id)
+  } catch {
+    lattice = null
+  }
+
+  res.json({ quantomo, siblings, lattice })
 })

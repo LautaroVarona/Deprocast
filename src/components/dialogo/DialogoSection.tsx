@@ -33,6 +33,7 @@ export function DialogoSection({
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [closeWeight, setCloseWeight] = useState(7)
   const [entityQuery, setEntityQuery] = useState('')
   const [entityHits, setEntityHits] = useState<TypeaheadHit[]>([])
   const [refLabels, setRefLabels] = useState<Record<string, string>>({})
@@ -188,6 +189,25 @@ export function DialogoSection({
     }
   }
 
+  const closeThread = async () => {
+    if (!selectedId || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const data = await api.closeDialogoThread(selectedId, closeWeight)
+      setError(
+        `Cerrado · peso ${data.weight} · ${data.proto.length} protoquántomo(s)`,
+      )
+      const detail = await api.getDialogoThread(selectedId)
+      setThread(detail.thread)
+      void loadThreads()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const removeRef = async (ref: DialogoEntityRef) => {
     if (!thread) return
     const next = thread.entity_refs.filter(
@@ -292,6 +312,36 @@ export function DialogoSection({
           <>
             <header className="dialogo-main-head">
               <h3>{thread.title}</h3>
+              {thread.status === 'closed' ? (
+                <p className="muted mono">
+                  Cerrado · peso {thread.hermetic_weight ?? '—'}
+                </p>
+              ) : (
+                <div className="dialogo-close-bar">
+                  <label className="mono">
+                    1–12
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={closeWeight}
+                      onChange={(e) =>
+                        setCloseWeight(
+                          Math.max(1, Math.min(12, Number(e.target.value) || 1)),
+                        )
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-tiny"
+                    disabled={busy || messages.length === 0}
+                    onClick={() => void closeThread()}
+                  >
+                    Terminar
+                  </button>
+                </div>
+              )}
               <div className="dialogo-refs">
                 {thread.entity_refs.map((r) => {
                   const key = `${r.type}:${r.id}`
@@ -371,9 +421,13 @@ export function DialogoSection({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Preguntá al corpus…"
+                placeholder={
+                  thread.status === 'closed'
+                    ? 'Hilo cerrado. Abrí uno nuevo para el addendum.'
+                    : 'Preguntá al corpus…'
+                }
                 rows={2}
-                disabled={busy}
+                disabled={busy || thread.status === 'closed'}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
@@ -384,7 +438,7 @@ export function DialogoSection({
               <button
                 type="submit"
                 className="btn"
-                disabled={busy || !draft.trim()}
+                disabled={busy || !draft.trim() || thread.status === 'closed'}
               >
                 Enviar
               </button>

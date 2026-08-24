@@ -22,6 +22,7 @@ import { seedMap } from './services/mapSeed.js'
 import { seedDeprocast } from './services/deprocastSeed.js'
 import { seedDominios } from './services/dominios.js'
 import { migratePersonGeografiaToTable } from './services/geografia.js'
+import { seedGazetteer } from './services/geoGazetteerSeed.js'
 
 const DATA_DIR = path.resolve(process.cwd(), 'data')
 const DB_PATH = path.join(DATA_DIR, 'deprocast.db')
@@ -219,13 +220,32 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'entries', 'diarization_json', 'TEXT')
   ensureColumn(database, 'entries', 'speaker_map', `TEXT NOT NULL DEFAULT '[]'`)
   ensureColumn(database, 'entries', 'duration_sec', 'REAL')
+  ensureColumn(database, 'entries', 'audio_analysis_json', 'TEXT')
   ensureColumn(database, 'entries', 'place_id', 'TEXT')
+  ensureColumn(database, 'geografia', 'parent_id', 'TEXT')
+  ensureColumn(database, 'geografia', 'admin_type', 'TEXT')
+  ensureColumn(database, 'geografia', 'admin_code', 'TEXT')
+  ensureColumn(database, 'geografia', 'capital_name', 'TEXT')
+  ensureColumn(database, 'geografia', 'iso_country', 'TEXT')
+  ensureColumn(database, 'geografia', 'human_weight', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(database, 'geografia', 'sort_order', 'INTEGER NOT NULL DEFAULT 0')
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_geografia_parent ON geografia(parent_id)`,
+  )
   ensureColumn(database, 'persons', 'merged_into', 'TEXT')
   ensureColumn(database, 'persons', 'is_operator', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(database, 'projects', 'merged_into', 'TEXT')
   ensureColumn(database, 'projects', 'aliases', `TEXT NOT NULL DEFAULT '[]'`)
   ensureColumn(database, 'quantomos', 'human_weight', 'INTEGER')
   ensureColumn(database, 'quantomos', 'suggested_weight', 'INTEGER')
+  ensureColumn(database, 'quantomos', 'stage', `TEXT NOT NULL DEFAULT 'proto'`)
+  ensureColumn(database, 'quantomos', 'source_kind', 'TEXT')
+  ensureColumn(database, 'quantomos', 'source_id', 'TEXT')
+  ensureColumn(database, 'quantomos', 'profile_json', `TEXT NOT NULL DEFAULT '{}'`)
+  ensureColumn(database, 'quantomos', 'calendar_json', `TEXT NOT NULL DEFAULT '{}'`)
+  ensureColumn(database, 'quantomos', 'generation', 'INTEGER NOT NULL DEFAULT 0')
+  ensureQuantomoLattices(database)
+  backfillQuantomoStages(database)
 
   // Cuadernos producto (físico/digital) — Trinchera = kind system
   ensureColumn(database, 'notebooks', 'kind', `TEXT NOT NULL DEFAULT 'system'`)
@@ -492,6 +512,76 @@ function migrate(database: DatabaseSync): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS sentinel_agents (
+      id TEXT PRIMARY KEY,
+      code TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      profile_md TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sentinel_agents_status
+      ON sentinel_agents(status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS sentinel_missions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      intro TEXT NOT NULL DEFAULT '',
+      instructions TEXT NOT NULL DEFAULT '',
+      resources_json TEXT NOT NULL DEFAULT '[]',
+      expected_output TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL,
+      paused_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sentinel_missions_agent
+      ON sentinel_missions(agent_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS sentinel_messages (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sentinel_messages_mission
+      ON sentinel_messages(mission_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS sentinel_events (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      mission_id TEXT,
+      kind TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sentinel_events_agent
+      ON sentinel_events(agent_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS sentinel_skills (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      input TEXT NOT NULL DEFAULT '',
+      processing TEXT NOT NULL DEFAULT '',
+      output TEXT NOT NULL DEFAULT '',
+      kind TEXT NOT NULL DEFAULT 'prompt',
+      body_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft',
+      weight INTEGER,
+      ida_item_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sentinel_skills_agent
+      ON sentinel_skills(agent_id, status, updated_at DESC);
+
     CREATE TABLE IF NOT EXISTS link_harvest (
       id TEXT PRIMARY KEY,
       url_cruda TEXT NOT NULL,
@@ -720,6 +810,19 @@ function migrate(database: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_geografia_source
       ON geografia(source, name COLLATE NOCASE);
 
+    CREATE TABLE IF NOT EXISTS geografia_geom (
+      geografia_id TEXT PRIMARY KEY,
+      geojson TEXT NOT NULL,
+      bbox_west REAL,
+      bbox_south REAL,
+      bbox_east REAL,
+      bbox_north REAL,
+      centroid_lng REAL,
+      centroid_lat REAL,
+      geom_source TEXT,
+      FOREIGN KEY (geografia_id) REFERENCES geografia(id)
+    );
+
     CREATE TABLE IF NOT EXISTS depro_ida_items (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
@@ -873,6 +976,10 @@ function migrate(database: DatabaseSync): void {
   backfillValidatedFileMetadata(database)
   backfillUnclearTimestamps(database)
   backfillQuantomoSuggestedWeights(database)
+  ensureColumn(database, 'dialogo_threads', 'status', `TEXT NOT NULL DEFAULT 'open'`)
+  ensureColumn(database, 'dialogo_threads', 'closed_at', 'TEXT')
+  ensureColumn(database, 'dialogo_threads', 'hermetic_weight', 'INTEGER')
+  ensureColumn(database, 'dialogo_threads', 'entry_id', 'TEXT')
   migratePersonKinds(database)
   scrubBookmarkAuthorEntities(database)
   refinePendingPersonKinds(database)
@@ -885,6 +992,41 @@ function migrate(database: DatabaseSync): void {
   backfillProjectAliases(database)
   ensureSearchFts(database)
   backfillCurrentRun(database)
+}
+
+function ensureQuantomoLattices(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS quantomo_lattices (
+      quantomo_id TEXT PRIMARY KEY,
+      run_id TEXT,
+      codec TEXT NOT NULL DEFAULT 'l72.v1',
+      generation INTEGER NOT NULL DEFAULT 1,
+      permutation_id INTEGER NOT NULL DEFAULT 0,
+      cells BLOB NOT NULL,
+      seal TEXT NOT NULL,
+      premium INTEGER NOT NULL DEFAULT 0,
+      domain_energies TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL
+    );
+  `)
+}
+
+/** recognized=1 histórico → sealed (sin lattice hasta reseal). El resto queda proto. */
+function backfillQuantomoStages(database: DatabaseSync): void {
+  database
+    .prepare(
+      `UPDATE quantomos
+       SET stage = 'sealed', generation = CASE
+         WHEN coalesce(generation, 0) < 1 THEN 1 ELSE generation END
+       WHERE recognized = 1 AND coalesce(stage, 'proto') = 'proto'`,
+    )
+    .run()
+  database
+    .prepare(
+      `UPDATE quantomos SET stage = 'proto'
+       WHERE recognized = 0 AND (stage IS NULL OR stage = '')`,
+    )
+    .run()
 }
 
 /** Quantomos existentes: el peso Cohere/Aduana pasa a suggested_weight. */
@@ -2009,6 +2151,7 @@ function seed(database: DatabaseSync): void {
   seedMap(database)
   seedDominios(database)
   seedDeprocast(database)
+  seedGazetteer(database)
 }
 
 export function getTrincheraNotebookId(): string {

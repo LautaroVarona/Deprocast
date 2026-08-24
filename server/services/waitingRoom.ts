@@ -15,6 +15,7 @@ import {
   listMasterProjects,
 } from './projectMatchmaker.js'
 import {
+  findGeografiaMatch,
   listGeografiaMasters,
   listGeografiaWaiting,
   normalizeGeoKind,
@@ -326,38 +327,44 @@ export function listGeneralWaiting(db: DatabaseSync): WaitingItem[] {
 }
 
 function loadWaitingPerson(db: DatabaseSync, id: string): Person | null {
-  return row<Person>(
-    db
-      .prepare(
-        `SELECT * FROM persons
-         WHERE id = ? AND source = 'extractor'
-           AND (merged_into IS NULL OR merged_into = '')`,
-      )
-      .get(id),
+  return (
+    row<Person>(
+      db
+        .prepare(
+          `SELECT * FROM persons
+           WHERE id = ? AND source = 'extractor'
+             AND (merged_into IS NULL OR merged_into = '')`,
+        )
+        .get(id),
+    ) ?? null
   )
 }
 
 function loadWaitingProject(db: DatabaseSync, id: string): Project | null {
-  return row<Project>(
-    db
-      .prepare(
-        `SELECT * FROM projects
-         WHERE id = ? AND source = 'extractor'
-           AND (merged_into IS NULL OR merged_into = '')`,
-      )
-      .get(id),
+  return (
+    row<Project>(
+      db
+        .prepare(
+          `SELECT * FROM projects
+           WHERE id = ? AND source = 'extractor'
+             AND (merged_into IS NULL OR merged_into = '')`,
+        )
+        .get(id),
+    ) ?? null
   )
 }
 
 function loadWaitingGeografia(db: DatabaseSync, id: string): Geografia | null {
-  return row<Geografia>(
-    db
-      .prepare(
-        `SELECT * FROM geografia
-         WHERE id = ? AND source = 'extractor'
-           AND (merged_into IS NULL OR merged_into = '')`,
-      )
-      .get(id),
+  return (
+    row<Geografia>(
+      db
+        .prepare(
+          `SELECT * FROM geografia
+           WHERE id = ? AND source = 'extractor'
+             AND (merged_into IS NULL OR merged_into = '')`,
+        )
+        .get(id),
+    ) ?? null
   )
 }
 
@@ -482,6 +489,39 @@ function addAliasesToProject(
   ).run(aliasesJson, now, master.id)
   syncProjectAliases(master.id, master.title, aliasesJson)
   return extras.find((e) => e.trim() && e.toLowerCase() !== master.title.toLowerCase()) ?? extras[0] ?? null
+}
+
+function addAliasesToGeografia(
+  db: DatabaseSync,
+  masterId: string,
+  extras: string[],
+  now: string,
+): string | null {
+  const master = row<Geografia>(
+    db.prepare(`SELECT * FROM geografia WHERE id = ?`).get(masterId),
+  )
+  if (
+    !master ||
+    (master.source !== 'manual' && master.source !== 'official')
+  ) {
+    throw new Error('Lugar maestro no encontrado')
+  }
+  const aliases = mergeAliases(
+    parseAliases(master.aliases),
+    extras,
+    master.name,
+  )
+  const aliasesJson = JSON.stringify(aliases)
+  db.prepare(
+    `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
+  ).run(aliasesJson, now, master.id)
+  return (
+    extras.find(
+      (e) => e.trim() && e.toLowerCase() !== master.name.toLowerCase(),
+    ) ??
+    extras[0] ??
+    null
+  )
 }
 
 function addPersonToAgrupacion(
@@ -643,10 +683,15 @@ export function attachWaitingMulti(
         const master = row<{ id: string; source: string }>(
           db.prepare(`SELECT id, source FROM geografia WHERE id = ?`).get(t.target_id),
         )
-        if (!master || master.source !== 'manual') {
+        if (
+          !master ||
+          (master.source !== 'manual' && master.source !== 'official')
+        ) {
           throw new Error('Lugar maestro no encontrado')
         }
         copyLinksToTarget(db, from, waitingId, 'geografia', t.target_id, now)
+        aliasAdded =
+          addAliasesToGeografia(db, t.target_id, extras, now) ?? aliasAdded
       } else if (t.to_type === 'agrupacion') {
         const agrup = row<{ id: string }>(
           db.prepare(`SELECT id FROM agrupaciones WHERE id = ?`).get(t.target_id),
@@ -973,113 +1018,36 @@ export function resolveWaiting(
     return { ok: true, result_type: 'person', result_id: personId }
   }
 
-  // —— Geografía attach / promote ——
-  if (action === 'attach' && to === 'geografia') {
-    const master = row<Geografia>(
-      db
-        .prepare(
-          `SELECT * FROM geografia
-           WHERE id = ? AND source = 'manual'
-             AND (merged_into IS NULL OR merged_into = '')`,
-        )
-        .get(String(input.target_id || '').trim()),
-    )
-    if (!master) throw new Error('Lugar maestro no encontrado')
-
-    if (from === 'geografia') {
-      const waiting = loadWaitingGeografia(db, waitingId)
-      if (!waiting) throw new Error('Lugar en espera no encontrado')
-      const aliases = mergeAliases(
-        parseAliases(master.aliases),
-        [waiting.name, ...parseAliases(waiting.aliases)],
-        master.name,
-      )
-      const aliasesJson = JSON.stringify(aliases)
-      db.exec('BEGIN')
-      try {
-        db.prepare(
-          `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
-        ).run(aliasesJson, now, master.id)
-        reassignLinks(db, 'geografia', waiting.id, 'geografia', master.id)
-        markGeografiaMerged(db, waiting.id, master.id, now)
-        db.exec('COMMIT')
-      } catch (e) {
-        db.exec('ROLLBACK')
-        throw e
-      }
-      return {
-        ok: true,
-        result_type: 'geografia',
-        result_id: master.id,
-        alias_added: waiting.name,
-      }
-    }
-
-    if (from === 'person') {
-      const waiting = loadWaitingPerson(db, waitingId)
-      if (!waiting) throw new Error('Entidad en espera no encontrada')
-      const aliases = mergeAliases(
-        parseAliases(master.aliases),
-        [waiting.name, ...parseAliases(waiting.aliases)],
-        master.name,
-      )
-      const aliasesJson = JSON.stringify(aliases)
-      db.exec('BEGIN')
-      try {
-        db.prepare(
-          `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
-        ).run(aliasesJson, now, master.id)
-        reassignLinks(db, 'person', waiting.id, 'geografia', master.id)
-        markPersonMerged(db, waiting.id, master.id, now)
-        db.exec('COMMIT')
-      } catch (e) {
-        db.exec('ROLLBACK')
-        throw e
-      }
-      return {
-        ok: true,
-        result_type: 'geografia',
-        result_id: master.id,
-        alias_added: waiting.name,
-      }
-    }
-
-    if (from === 'project') {
-      const waiting = loadWaitingProject(db, waitingId)
-      if (!waiting) throw new Error('Proyecto en espera no encontrado')
-      const aliases = mergeAliases(
-        parseAliases(master.aliases),
-        [waiting.title, ...parseAliases(waiting.aliases)],
-        master.name,
-      )
-      const aliasesJson = JSON.stringify(aliases)
-      db.exec('BEGIN')
-      try {
-        db.prepare(
-          `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
-        ).run(aliasesJson, now, master.id)
-        reassignLinks(db, 'project', waiting.id, 'geografia', master.id)
-        markProjectMerged(db, waiting.id, master.id, now)
-        db.exec('COMMIT')
-      } catch (e) {
-        db.exec('ROLLBACK')
-        throw e
-      }
-      return {
-        ok: true,
-        result_type: 'geografia',
-        result_id: master.id,
-        alias_added: waiting.title,
-      }
-    }
-  }
-
+  // —— Geografía promote ——
   if (action === 'promote' && to === 'geografia') {
     if (from === 'geografia') {
       const waiting = loadWaitingGeografia(db, waitingId)
       if (!waiting) throw new Error('Lugar en espera no encontrado')
       const name = (input.name ?? waiting.name).trim()
       const kind = normalizeGeoKind(input.kind ?? waiting.kind)
+      const match = findGeografiaMatch(name)
+      if (match && match.id !== waiting.id) {
+        db.exec('BEGIN')
+        try {
+          const aliases = mergeAliases(
+            parseAliases(match.aliases),
+            [...parseAliases(waiting.aliases), waiting.name],
+            name,
+          )
+          db.prepare(
+            `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
+          ).run(JSON.stringify(aliases), now, match.id)
+          reassignLinks(db, 'geografia', waiting.id, 'geografia', match.id)
+          db.prepare(
+            `UPDATE geografia SET status = 'merged', merged_into = ?, updated_at = ? WHERE id = ?`,
+          ).run(match.id, now, waiting.id)
+          db.exec('COMMIT')
+        } catch (e) {
+          db.exec('ROLLBACK')
+          throw e
+        }
+        return { ok: true, result_type: 'geografia', result_id: match.id }
+      }
       db.exec('BEGIN')
       try {
         db.prepare(
@@ -1100,8 +1068,27 @@ export function resolveWaiting(
     if (from === 'person') {
       const waiting = loadWaitingPerson(db, waitingId)
       if (!waiting) throw new Error('Entidad en espera no encontrada')
-      const geoId = randomUUID()
       const name = (input.name ?? waiting.name).trim()
+      const match = findGeografiaMatch(name)
+      if (match) {
+        const aliasesJson = JSON.stringify(
+          mergeAliases(parseAliases(match.aliases), [waiting.name], name),
+        )
+        db.exec('BEGIN')
+        try {
+          db.prepare(
+            `UPDATE geografia SET aliases = ?, updated_at = ? WHERE id = ?`,
+          ).run(aliasesJson, now, match.id)
+          reassignLinks(db, 'person', waiting.id, 'geografia', match.id)
+          markPersonMerged(db, waiting.id, match.id, now)
+          db.exec('COMMIT')
+        } catch (e) {
+          db.exec('ROLLBACK')
+          throw e
+        }
+        return { ok: true, result_type: 'geografia', result_id: match.id }
+      }
+      const geoId = randomUUID()
       const aliasesJson = JSON.stringify(
         mergeAliases(parseAliases(waiting.aliases), [waiting.name], name),
       )
@@ -1161,81 +1148,6 @@ export function resolveWaiting(
         throw e
       }
       return { ok: true, result_type: 'geografia', result_id: geoId }
-    }
-  }
-
-  // Attach geografia waiting → person/project (cross)
-  if (action === 'attach' && from === 'geografia' && to === 'person') {
-    const waiting = loadWaitingGeografia(db, waitingId)
-    if (!waiting) throw new Error('Lugar en espera no encontrado')
-    const targetId = String(input.target_id || '').trim()
-    const master = row<Person>(
-      db.prepare(`SELECT * FROM persons WHERE id = ?`).get(targetId),
-    )
-    if (!master || master.source !== 'manual') {
-      throw new Error('Perfil maestro no encontrado')
-    }
-    const aliases = mergeAliases(
-      parseAliases(master.aliases),
-      [waiting.name, ...parseAliases(waiting.aliases)],
-      master.name,
-    )
-    const aliasesJson = JSON.stringify(aliases)
-    db.exec('BEGIN')
-    try {
-      db.prepare(
-        `UPDATE persons SET aliases = ?, updated_at = ? WHERE id = ?`,
-      ).run(aliasesJson, now, master.id)
-      syncPersonAliases(master.id, master.name, aliasesJson)
-      reassignLinks(db, 'geografia', waiting.id, 'person', master.id)
-      markGeografiaMerged(db, waiting.id, master.id, now)
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
-    return {
-      ok: true,
-      result_type: 'person',
-      result_id: master.id,
-      alias_added: waiting.name,
-    }
-  }
-
-  if (action === 'attach' && from === 'geografia' && to === 'project') {
-    const waiting = loadWaitingGeografia(db, waitingId)
-    if (!waiting) throw new Error('Lugar en espera no encontrado')
-    const targetId = String(input.target_id || '').trim()
-    const master = row<Project>(
-      db.prepare(`SELECT * FROM projects WHERE id = ?`).get(targetId),
-    )
-    if (!master || master.source !== 'manual') {
-      throw new Error('Proyecto maestro no encontrado')
-    }
-    const aliases = mergeAliases(
-      parseAliases(master.aliases),
-      [waiting.name, ...parseAliases(waiting.aliases)],
-      master.title,
-    )
-    const aliasesJson = JSON.stringify(aliases)
-    db.exec('BEGIN')
-    try {
-      db.prepare(
-        `UPDATE projects SET aliases = ?, updated_at = ? WHERE id = ?`,
-      ).run(aliasesJson, now, master.id)
-      syncProjectAliases(master.id, master.title, aliasesJson)
-      reassignLinks(db, 'geografia', waiting.id, 'project', master.id)
-      markGeografiaMerged(db, waiting.id, master.id, now)
-      db.exec('COMMIT')
-    } catch (e) {
-      db.exec('ROLLBACK')
-      throw e
-    }
-    return {
-      ok: true,
-      result_type: 'project',
-      result_id: master.id,
-      alias_added: waiting.name,
     }
   }
 

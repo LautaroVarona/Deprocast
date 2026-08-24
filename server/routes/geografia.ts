@@ -3,8 +3,10 @@ import {
   createGeografia,
   deleteGeografia,
   getGeografia,
+  getGeografiaMap,
   listAllGeografia,
   listGeografiaMasters,
+  listGeografiaTree,
   listGeografiaWaiting,
   promoteGeografia,
   updateGeografia,
@@ -22,6 +24,19 @@ geografiaRouter.get('/', (_req, res) => {
     waiting_count: waiting.length,
     all: listAllGeografia(),
   })
+})
+
+geografiaRouter.get('/tree', (_req, res) => {
+  res.json({ tree: listGeografiaTree() })
+})
+
+geografiaRouter.get('/:id/map', (req, res) => {
+  const payload = getGeografiaMap(String(req.params.id ?? ''))
+  if (!payload) {
+    res.status(404).json({ error: 'Lugar no encontrado' })
+    return
+  }
+  res.json(payload)
 })
 
 geografiaRouter.get('/:id', (req, res) => {
@@ -78,7 +93,11 @@ geografiaRouter.delete('/:id', (req, res) => {
     res.json({ ok: true, ...result })
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Error al borrar'
-    const status = msg.includes('no encontrado') ? 404 : 500
+    const status = msg.includes('no encontrado')
+      ? 404
+      : msg.includes('oficial')
+        ? 409
+        : 500
     res.status(status).json({ error: msg })
   }
 })
