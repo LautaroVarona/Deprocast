@@ -379,6 +379,27 @@ export interface BookmarkQueueStatus {
   finished_at: string | null
 }
 
+export interface ChatQueueStatus {
+  running: boolean
+  stop_requested: boolean
+  target: number
+  done: number
+  remaining: number
+  skipped: number
+  current_id: string | null
+  current_title: string | null
+  last_item: {
+    block_id: string
+    session_id: string
+    entry_id: string
+    quantomo_id: string
+    title: string
+  } | null
+  errors: Array<{ id: string; error: string }>
+  started_at: string | null
+  finished_at: string | null
+}
+
 export interface PendingTask {
   id: string
   entry_id: string

@@ -6,6 +6,7 @@ import cors from 'cors'
 import { closeDb, initDb } from './db.js'
 import { recoverOrphanedProcessing } from './services/pipeline.js'
 import { recoverExpiredLeases } from './services/jobs.js'
+import { repairChatDestillLinks } from './services/chatProcess.js'
 import { ingestRouter } from './routes/ingest.js'
 import { entriesRouter } from './routes/entries.js'
 import { pipelineRouter } from './routes/pipeline.js'
@@ -59,6 +60,16 @@ if (!envCheck.ok) {
 }
 
 initDb()
+try {
+  const repaired = repairChatDestillLinks()
+  if (repaired.removed > 0) {
+    console.warn(
+      `[chats] recortados ${repaired.removed} vínculo(s) de hablante/sesión en destilados`,
+    )
+  }
+} catch (err) {
+  console.warn('[chats] no se pudieron recortar vínculos:', err)
+}
 recoverOrphanedProcessing()
 try {
   const n = recoverExpiredLeases()
@@ -151,6 +162,7 @@ const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`[deprocast] server listening on http://127.0.0.1:${PORT}`)
   console.log(`[deprocast] Cohere configured: ${caps.cohere}`)
   console.log(`[deprocast] OpenRouter configured: ${caps.openrouter}`)
+  console.log(`[deprocast] Groq configured: ${caps.groq}`)
   console.log('[deprocast] local token ready (no se imprime el valor)')
 })
 

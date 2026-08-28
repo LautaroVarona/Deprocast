@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { normalizePersonKind } from '../server/services/personKinds.ts'
 import {
+  conversationTodoTask,
   parseChatSpeakerMap,
   previewMessagesByBlock,
   resolveChatProcessWeight,
+  sessionSpeakersReady,
   speakersHaveAi,
+  tasksFromChatExtraction,
 } from '../server/services/chatSpeakers.ts'
 import type { Person } from '../src/types.ts'
 import {
@@ -97,6 +100,41 @@ describe('chatSpeakers', () => {
       },
     ])
     expect(map.get('b1')?.map((m) => m.texto_crudo)).toEqual(['uno', 'dos'])
+  })
+})
+
+describe('chat extraction tasks', () => {
+  it('dedupea actions y milestones como todos', () => {
+    const tasks = tasksFromChatExtraction({
+      actions: [
+        { task_text: 'Llamar a Camila', tag: 'todo' },
+        { task_text: ' llamar a camila ', tag: 'seguimiento' },
+      ],
+      milestones: ['Llamar a Camila', 'Entrega lunes'],
+    })
+    expect(tasks).toEqual([
+      { task_text: 'Llamar a Camila', tag: 'todo' },
+      { task_text: 'Entrega lunes', tag: 'hito' },
+    ])
+  })
+
+  it('arma el todo de conversación votada', () => {
+    expect(conversationTodoTask('Versa', 9)).toEqual({
+      task_text: 'Conversación «Versa» · peso 9',
+      tag: 'todo',
+    })
+  })
+
+  it('sessionSpeakersReady exige perfiles', () => {
+    expect(sessionSpeakersReady([])).toBe(false)
+    expect(
+      sessionSpeakersReady([{ remitente: 'A', person_id: null, person_name: null }]),
+    ).toBe(false)
+    expect(
+      sessionSpeakersReady([
+        { remitente: 'A', person_id: 'p1', person_name: 'Ana' },
+      ]),
+    ).toBe(true)
   })
 })
 

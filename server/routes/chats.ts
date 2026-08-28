@@ -4,6 +4,7 @@ import type { BookmarkManualTag, ChatSpeakerMap, ChatTipo } from '../types.js'
 import {
   assignBlockEntity,
   deleteChatSession,
+  exportChatConversations,
   getChatBlockDetail,
   getChatSessionDetail,
   importChatSession,
@@ -13,6 +14,11 @@ import {
   updateChatBlock,
   updateChatSession,
 } from '../services/chatProcess.js'
+import {
+  getChatQueueStatus,
+  startChatProcess,
+  stopChatProcess,
+} from '../services/chatQueue.js'
 
 export const chatsRouter = Router()
 
@@ -200,6 +206,42 @@ chatsRouter.post('/import', upload.single('file'), (req, res) => {
   }
 })
 
+chatsRouter.post('/process/start', (req, res) => {
+  try {
+    const sessionId = req.body?.session_id
+      ? String(req.body.session_id)
+      : undefined
+    const blockId = req.body?.block_id
+      ? String(req.body.block_id)
+      : undefined
+    const result = startChatProcess({ sessionId, blockId })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
+chatsRouter.post('/process/stop', (_req, res) => {
+  res.json({ ok: true, ...stopChatProcess() })
+})
+
+chatsRouter.get('/process/status', (_req, res) => {
+  res.json({ ok: true, ...getChatQueueStatus() })
+})
+
+chatsRouter.get('/export', (_req, res) => {
+  try {
+    const payload = exportChatConversations()
+    res.json({ ok: true, ...payload })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
 chatsRouter.get('/:id', (req, res) => {
   try {
     const detail = getChatSessionDetail(req.params.id)
@@ -208,6 +250,21 @@ chatsRouter.get('/:id', (req, res) => {
       return
     }
     res.json({ ok: true, ...detail })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
+chatsRouter.get('/:id/export', (req, res) => {
+  try {
+    const payload = exportChatConversations(req.params.id)
+    if (payload.count === 0) {
+      res.status(404).json({ error: 'Sesión no encontrada' })
+      return
+    }
+    res.json({ ok: true, ...payload })
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : String(err),

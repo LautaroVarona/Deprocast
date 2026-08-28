@@ -681,6 +681,7 @@ export interface ChatExtraction {
   }>
   locations?: string[]
   milestones?: string[]
+  actions?: CohereAction[]
 }
 
 export type AmaListKind =

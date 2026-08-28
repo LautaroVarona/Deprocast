@@ -20,16 +20,18 @@ import type {
 } from '../types.js'
 import {
   applyEntryManualTagsAsLinks,
-  applySpeakerLinks,
 } from './audioCriba.js'
 import { createBlocksForSession } from './chatBlocks.js'
 import { parseWhatsAppExport, type ParsedChat } from './chatParse.js'
 import { extractFromChatBlock } from './cohere.js'
 import {
+  conversationTodoTask,
   parseChatSpeakerMap,
   previewMessagesByBlock,
   resolveChatProcessWeight,
+  sessionSpeakersReady as allSpeakersHaveProfiles,
   speakersHaveAi,
+  tasksFromChatExtraction,
 } from './chatSpeakers.js'
 import { createEntityProposalsFromEntry, normalizeName } from './entityMatch.js'
 import { insertLinkHarvest } from './linkHarvest.js'
@@ -272,6 +274,265 @@ function tagsFromIds(
   return tags
 }
 
+const OPEN_BLOCK_SQL = `(b.estado IN ('pendiente', 'error') AND (b.entry_id IS NULL OR b.entry_id = ''))`
+const HITL_BLOCK_SQL = `(b.estado = 'analizado' AND b.entry_id IS NOT NULL AND json_extract(coalesce(b.summary_json, '{}'), '$.destill') = 'hitl')`
+const PROCESSABLE_BLOCK_SQL = `(${OPEN_BLOCK_SQL} OR ${HITL_BLOCK_SQL})`
+const PROCESSABLE_UNALIASED = PROCESSABLE_BLOCK_SQL.replace(/\bb\./g, '')
+
+export function sessionSpeakersReady(
+  session: Pick<ChatSession, 'speaker_map_json'>,
+): boolean {
+  return allSpeakersHaveProfiles(session.speaker_map_json)
+}
+
+export function repairChatDestillLinks(sessionId?: string): { removed: number } {
+  const db = getDb()
+  const blocks = rows<ChatBlock>(
+    sessionId
+      ? db
+          .prepare(
+            `SELECT * FROM chat_blocks WHERE entry_id IS NOT NULL AND chat_session_id = ?`,
+          )
+          .all(sessionId)
+      : db.prepare(`SELECT * FROM chat_blocks WHERE entry_id IS NOT NULL`).all(),
+  )
+  const del = db.prepare(`DELETE FROM entity_links WHERE id = ?`)
+  let removed = 0
+  for (const block of blocks) {
+    if (!block.entry_id) continue
+    const extra = parseLinkedEntitiesJson(block.linked_entities_json)
+    const allowed = new Set<string>()
+    for (const id of parseJsonArray(block.linked_person_ids_json)) {
+      allowed.add(`person:${id}`)
+    }
+    for (const id of parseJsonArray(block.linked_project_ids_json)) {
+      allowed.add(`project:${id}`)
+    }
+    for (const t of extra) allowed.add(`${t.kind}:${t.entity_id}`)
+    const links = rows<{
+      id: string
+      entity_kind: string
+      entity_id: string
+      role: string
+    }>(
+      db
+        .prepare(
+          `SELECT id, entity_kind, entity_id, role FROM entity_links WHERE entry_id = ?`,
+        )
+        .all(block.entry_id),
+    )
+    for (const l of links) {
+      if (l.role === 'speaker') {
+        del.run(l.id)
+        removed++
+        continue
+      }
+      if (
+        l.role === 'mentioned' ||
+        l.role === 'primary' ||
+        l.role === 'participant'
+      ) {
+        if (!allowed.has(`${l.entity_kind}:${l.entity_id}`)) {
+          del.run(l.id)
+          removed++
+        }
+      }
+    }
+  }
+  return { removed }
+}
+
+export function reopenFailedChatBlocks(sessionId?: string): number {
+  const db = getDb()
+  const where = sessionId
+    ? `estado = 'error' AND (entry_id IS NULL OR entry_id = '') AND chat_session_id = ?`
+    : `estado = 'error' AND (entry_id IS NULL OR entry_id = '')`
+  const params = sessionId ? [sessionId] : []
+  const result = db
+    .prepare(`UPDATE chat_blocks SET estado = 'pendiente', summary_json = '{}' WHERE ${where}`)
+    .run(...params)
+  db.prepare(
+    `UPDATE chat_sessions SET status = 'parsed', updated_at = ?
+     WHERE (? IS NULL OR id = ?)
+       AND EXISTS (
+         SELECT 1 FROM chat_blocks b
+         WHERE b.chat_session_id = chat_sessions.id
+           AND ${PROCESSABLE_BLOCK_SQL}
+       )`,
+  ).run(new Date().toISOString(), sessionId ?? null, sessionId ?? null)
+  return Number(result.changes ?? 0)
+}
+
+export function listProcessableChatBlocks(opts?: {
+  sessionId?: string
+  blockId?: string
+}): Array<{
+  session_id: string
+  block_id: string
+  day_key: string
+  nombre_chat: string
+}> {
+  const db = getDb()
+  const sessionId = opts?.sessionId?.trim() || null
+  const blockId = opts?.blockId?.trim() || null
+  if (blockId) {
+    const block = row<ChatBlock & { nombre_chat: string; speaker_map_json: string }>(
+      db
+        .prepare(
+          `SELECT b.*, s.nombre_chat, s.speaker_map_json
+           FROM chat_blocks b
+           JOIN chat_sessions s ON s.id = b.chat_session_id
+           WHERE b.id = ? AND ${PROCESSABLE_BLOCK_SQL}
+             AND (? IS NULL OR b.chat_session_id = ?)`,
+        )
+        .get(blockId, sessionId, sessionId),
+    )
+    if (!block) return []
+    if (!allSpeakersHaveProfiles(block.speaker_map_json)) return []
+    return [
+      {
+        session_id: block.chat_session_id,
+        block_id: block.id,
+        day_key: block.day_key,
+        nombre_chat: block.nombre_chat,
+      },
+    ]
+  }
+
+  const rowsOut = rows<
+    ChatBlock & {
+      nombre_chat: string
+      speaker_map_json: string
+      session_weight: number | null
+    }
+  >(
+    sessionId
+      ? db
+          .prepare(
+            `SELECT b.*, s.nombre_chat, s.speaker_map_json, s.human_weight AS session_weight
+             FROM chat_blocks b
+             JOIN chat_sessions s ON s.id = b.chat_session_id
+             WHERE b.chat_session_id = ?
+               AND ${PROCESSABLE_BLOCK_SQL}
+               AND (b.human_weight IS NOT NULL OR s.human_weight IS NOT NULL)
+             ORDER BY b.started_at ASC`,
+          )
+          .all(sessionId)
+      : db
+          .prepare(
+            `SELECT b.*, s.nombre_chat, s.speaker_map_json, s.human_weight AS session_weight
+             FROM chat_blocks b
+             JOIN chat_sessions s ON s.id = b.chat_session_id
+             WHERE ${PROCESSABLE_BLOCK_SQL}
+               AND (b.human_weight IS NOT NULL OR s.human_weight IS NOT NULL)
+             ORDER BY s.updated_at DESC, b.started_at ASC
+             LIMIT 200`,
+          )
+          .all(),
+  )
+  return rowsOut
+    .filter((b) => allSpeakersHaveProfiles(b.speaker_map_json))
+    .map((b) => ({
+      session_id: b.chat_session_id,
+      block_id: b.id,
+      day_key: b.day_key,
+      nombre_chat: b.nombre_chat,
+    }))
+}
+
+function harvestUrls(
+  db: DatabaseSync,
+  urls: string[],
+  meta: {
+    sessionId: string
+    sourceId: string
+    sourceType: 'chat_message' | 'entry' | 'quantomo'
+    timestamp?: string | null
+  },
+): number {
+  let n = 0
+  for (const url of urls) {
+    if (
+      insertLinkHarvest(db, {
+        url_cruda: url,
+        source_type: meta.sourceType,
+        source_id: meta.sourceId,
+        timestamp_captura: meta.timestamp ?? null,
+        chat_session_id: meta.sessionId,
+      })
+    ) {
+      n++
+    }
+  }
+  return n
+}
+
+function applyExactProposalLinks(
+  db: DatabaseSync,
+  entryId: string,
+  quantomoId: string,
+): void {
+  const hits = rows<{
+    id: string
+    kind: string
+    suggested_name: string
+    matched_entity_id: string
+  }>(
+    db
+      .prepare(
+        `SELECT id, kind, suggested_name, matched_entity_id
+         FROM entity_proposals
+         WHERE entry_id = ?
+           AND status = 'pending'
+           AND proposal_type = 'link'
+           AND matched_entity_id IS NOT NULL
+           AND matched_entity_id != ''`,
+      )
+      .all(entryId),
+  )
+  const tags: BookmarkManualTag[] = []
+  for (const h of hits) {
+    if (h.kind !== 'person' && h.kind !== 'project') continue
+    tags.push({
+      kind: h.kind,
+      entity_id: h.matched_entity_id,
+      entity_name: h.suggested_name,
+    })
+  }
+  if (tags.length) {
+    applyEntryManualTagsAsLinks(db, JSON.stringify(tags), entryId, quantomoId)
+  }
+  const now = new Date().toISOString()
+  const accept = db.prepare(
+    `UPDATE entity_proposals
+     SET status = 'accepted', resolved_at = ?
+     WHERE id = ?`,
+  )
+  for (const h of hits) {
+    accept.run(now, h.id)
+  }
+}
+
+function sessionHasConversationTodo(
+  db: DatabaseSync,
+  sessionId: string,
+): boolean {
+  const n = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n
+           FROM pending_tasks t
+           JOIN entries e ON e.id = t.entry_id
+           WHERE t.tag = 'todo'
+             AND e.original_filename LIKE ?`,
+        )
+        .get(`chat:${sessionId}:%`) as { n: number | bigint }
+    ).n ?? 0,
+  )
+  return n > 0
+}
+
 export function previewChatFile(
   buffer: Buffer,
   filename: string,
@@ -495,7 +756,8 @@ async function processChatSessionInner(
         db
           .prepare(
             `SELECT * FROM chat_blocks
-             WHERE chat_session_id = ? AND id = ? AND estado = 'pendiente'`,
+             WHERE chat_session_id = ? AND id = ?
+               AND ${PROCESSABLE_UNALIASED}`,
           )
           .all(sessionId, opts.blockId),
       )
@@ -503,11 +765,12 @@ async function processChatSessionInner(
         db
           .prepare(
             `SELECT * FROM chat_blocks
-             WHERE chat_session_id = ? AND estado = 'pendiente'
+             WHERE chat_session_id = ? AND ${PROCESSABLE_UNALIASED}
+               AND (human_weight IS NOT NULL OR ? IS NOT NULL)
              ORDER BY started_at ASC
              LIMIT ?`,
           )
-          .all(sessionId, limit),
+          .all(sessionId, session.human_weight ?? null, limit),
       )
 
   const result: ProcessChatResult = {
@@ -524,7 +787,8 @@ async function processChatSessionInner(
         db
           .prepare(
             `SELECT COUNT(*) AS n FROM chat_blocks
-             WHERE chat_session_id = ? AND estado = 'pendiente'`,
+             WHERE chat_session_id = ?
+               AND ${PROCESSABLE_UNALIASED}`,
           )
           .get(sessionId) as { n: number | bigint }
       ).n ?? 0,
@@ -543,8 +807,6 @@ async function processChatSessionInner(
   ).run(new Date().toISOString(), sessionId)
 
   const participantes = parseJsonArray(session.participantes_json)
-  const linkedPersonIds = parseJsonArray(session.linked_person_ids_json)
-  const linkedProjectIds = parseJsonArray(session.linked_project_ids_json)
   const speakers = hydrateSpeakerMap(
     db,
     parseChatSpeakerMap(session.speaker_map_json),
@@ -557,8 +819,6 @@ async function processChatSessionInner(
         session,
         block,
         participantes,
-        linkedPersonIds,
-        linkedProjectIds,
         speakers,
         notebookId,
       })
@@ -567,9 +827,18 @@ async function processChatSessionInner(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       result.errors.push({ block_id: block.id, error: msg })
+      const keepHitl = Boolean(block.entry_id)
       db.prepare(
-        `UPDATE chat_blocks SET estado = 'error', summary_json = ? WHERE id = ?`,
-      ).run(JSON.stringify({ error: msg }), block.id)
+        `UPDATE chat_blocks SET estado = ?, summary_json = ? WHERE id = ?`,
+      ).run(
+        keepHitl ? 'analizado' : 'error',
+        JSON.stringify(
+          keepHitl
+            ? { error: msg, destill: 'hitl' }
+            : { error: msg },
+        ),
+        block.id,
+      )
     }
   }
 
@@ -578,7 +847,8 @@ async function processChatSessionInner(
       db
         .prepare(
           `SELECT COUNT(*) AS n FROM chat_blocks
-           WHERE chat_session_id = ? AND estado = 'pendiente'`,
+           WHERE chat_session_id = ?
+             AND ${PROCESSABLE_UNALIASED}`,
         )
         .get(sessionId) as { n: number | bigint }
     ).n ?? 0,
@@ -598,8 +868,6 @@ async function processOneBlock(
     session: ChatSession
     block: ChatBlock
     participantes: string[]
-    linkedPersonIds: string[]
-    linkedProjectIds: string[]
     speakers: ChatSpeakerMap[]
     notebookId: string
   },
@@ -613,8 +881,6 @@ async function processOneBlock(
     session,
     block,
     participantes,
-    linkedPersonIds,
-    linkedProjectIds,
     speakers,
     notebookId,
   } = ctx
@@ -634,33 +900,24 @@ async function processOneBlock(
   const blockPeople = parseJsonArray(block.linked_person_ids_json)
   const blockProjects = parseJsonArray(block.linked_project_ids_json)
   const blockExtra = parseLinkedEntitiesJson(block.linked_entities_json)
-  const allPersonIds = uniqueIds([
-    ...linkedPersonIds,
-    ...blockPeople,
-    session.primary_person_id ?? '',
-    ...speakers.map((s) => s.person_id ?? ''),
-  ])
-  const allProjectIds = uniqueIds([
-    ...linkedProjectIds,
-    ...blockProjects,
-    session.primary_project_id ?? '',
-  ])
-  const blockTags = tagsFromIds(db, allPersonIds, allProjectIds, blockExtra)
+  const mentionPersonIds = uniqueIds(blockPeople)
+  const mentionProjectIds = uniqueIds(blockProjects)
+  const blockTags = tagsFromIds(
+    db,
+    mentionPersonIds,
+    mentionProjectIds,
+    blockExtra,
+  )
 
   const canonicalParticipants = participantes.map((p) =>
     displayRemitente(p, speakers),
   )
-  const speakerBanner = speakers
-    .filter((s) => s.person_name)
-    .map((s) => `${s.person_name}${s.is_ai ? ' (IA)' : ''}`)
-    .join(', ')
   const blockNotes = String(block.notes ?? '').trim()
   const blockLinks = mergeUrlLists(
     parseJsonArray(block.links_json),
     extractUrlsFromMessages(messages),
   )
   const transcript = [
-    speakerBanner ? `Conversación entre: ${speakerBanner}.` : '',
     blockNotes ? `Notas del chat: ${blockNotes}` : '',
     blockLinks.length
       ? `Links:\n${blockLinks.map((u) => `- ${u}`).join('\n')}`
@@ -669,10 +926,10 @@ async function processOneBlock(
   ]
     .filter(Boolean)
     .join('\n\n')
-  const peopleNames = allPersonIds
+  const peopleNames = mentionPersonIds
     .map((id) => personNameById(db, id))
     .filter((n): n is string => Boolean(n))
-  const projectNames = allProjectIds
+  const projectNames = mentionProjectIds
     .map((id) => projectTitleById(db, id))
     .filter((n): n is string => Boolean(n))
   const extraNames = blockExtra
@@ -699,8 +956,9 @@ async function processOneBlock(
     links: blockLinks,
   })
 
-  const entryId = randomUUID()
-  const quantomoId = randomUUID()
+  const reuseEntry = Boolean(block.entry_id)
+  const entryId = block.entry_id || randomUUID()
+  const quantomoId = block.quantomo_id || randomUUID()
   const now = new Date().toISOString()
   const title = clampTitleWords(
     extraction.title,
@@ -716,12 +974,14 @@ async function processOneBlock(
     hasAi,
   })
   const entrySpeakerMap = toEntrySpeakerMap(speakers)
+  const destill = 'llm' as const
   const profileJson = JSON.stringify({
     has_ai: hasAi,
     conversation_id: session.id,
     conversation_name: session.nombre_chat,
     conversation_weight: session.human_weight ?? null,
     chat_weight: block.human_weight ?? null,
+    destill,
     notes: blockNotes,
     links: blockLinks,
     conversation_speakers: speakers.map((s) => ({
@@ -742,43 +1002,106 @@ async function processOneBlock(
 
   db.exec('BEGIN')
   try {
-    db.prepare(
-      `INSERT INTO entries (
-        id, notebook_id, source_type, title, content_raw, vault_path,
-        timestamp_exact, status, created_at, title_manual, original_filename,
-        speaker_map, human_weight, manual_tags
-      ) VALUES (?, ?, 'chat', ?, ?, ?, ?, 'approved', ?, 1, ?, ?, ?, ?)`,
-    ).run(
-      entryId,
-      notebookId,
-      title,
-      transcript,
-      session.vault_path,
-      block.started_at,
-      now,
-      `chat:${session.id}:${block.id}`,
-      JSON.stringify(entrySpeakerMap),
-      weight,
-      JSON.stringify(blockTags),
-    )
+    if (reuseEntry) {
+      db.prepare(`DELETE FROM pending_tasks WHERE entry_id = ?`).run(entryId)
+      db.prepare(`DELETE FROM entry_entities_raw WHERE entry_id = ?`).run(entryId)
+      db.prepare(`DELETE FROM entity_proposals WHERE entry_id = ?`).run(entryId)
+      db.prepare(`DELETE FROM entity_links WHERE entry_id = ?`).run(entryId)
+      db.prepare(
+        `DELETE FROM embeddings WHERE object_type = 'quantomo' AND object_id = ?`,
+      ).run(quantomoId)
+      db.prepare(
+        `UPDATE entries SET
+          notebook_id = ?, title = ?, content_raw = ?, vault_path = ?,
+          timestamp_exact = ?, speaker_map = ?, human_weight = ?, manual_tags = ?
+         WHERE id = ?`,
+      ).run(
+        notebookId,
+        title,
+        transcript,
+        session.vault_path,
+        block.started_at,
+        JSON.stringify(entrySpeakerMap),
+        weight,
+        JSON.stringify(blockTags),
+        entryId,
+      )
+      const quantomoExists = row<{ id: string }>(
+        db.prepare(`SELECT id FROM quantomos WHERE id = ?`).get(quantomoId),
+      )
+      if (quantomoExists) {
+        db.prepare(
+          `UPDATE quantomos SET
+            title = ?, content = ?, hermetic_weight = ?, human_weight = ?,
+            suggested_weight = ?, profile_json = ?
+           WHERE id = ?`,
+        ).run(
+          title,
+          extraction.quantomo,
+          weight,
+          weight,
+          extraction.suggested_weight ?? weight,
+          profileJson,
+          quantomoId,
+        )
+      } else {
+        db.prepare(
+          `INSERT INTO quantomos (
+            id, entry_id, title, content, hermetic_weight, universe, recognized,
+            human_weight, suggested_weight, stage, source_kind, source_id,
+            profile_json
+          ) VALUES (?, ?, ?, ?, ?, 'chat', 0, ?, ?, 'proto', 'chat_import', ?, ?)`,
+        ).run(
+          quantomoId,
+          entryId,
+          title,
+          extraction.quantomo,
+          weight,
+          weight,
+          extraction.suggested_weight ?? weight,
+          block.id,
+          profileJson,
+        )
+      }
+    } else {
+      db.prepare(
+        `INSERT INTO entries (
+          id, notebook_id, source_type, title, content_raw, vault_path,
+          timestamp_exact, status, created_at, title_manual, original_filename,
+          speaker_map, human_weight, manual_tags
+        ) VALUES (?, ?, 'chat', ?, ?, ?, ?, 'approved', ?, 1, ?, ?, ?, ?)`,
+      ).run(
+        entryId,
+        notebookId,
+        title,
+        transcript,
+        session.vault_path,
+        block.started_at,
+        now,
+        `chat:${session.id}:${block.id}`,
+        JSON.stringify(entrySpeakerMap),
+        weight,
+        JSON.stringify(blockTags),
+      )
 
-    db.prepare(
-      `INSERT INTO quantomos (
-        id, entry_id, title, content, hermetic_weight, universe, recognized,
-        human_weight, suggested_weight, stage, source_kind, source_id,
-        profile_json
-      ) VALUES (?, ?, ?, ?, ?, 'chat', 0, ?, ?, 'proto', 'chat_import', ?, ?)`,
-    ).run(
-      quantomoId,
-      entryId,
-      title,
-      extraction.quantomo,
-      weight,
-      weight,
-      extraction.suggested_weight ?? weight,
-      block.id,
-      profileJson,
-    )
+      db.prepare(
+        `INSERT INTO quantomos (
+          id, entry_id, title, content, hermetic_weight, universe, recognized,
+          human_weight, suggested_weight, stage, source_kind, source_id,
+          profile_json
+        ) VALUES (?, ?, ?, ?, ?, 'chat', 0, ?, ?, 'proto', 'chat_import', ?, ?)`,
+      ).run(
+        quantomoId,
+        entryId,
+        title,
+        extraction.quantomo,
+        weight,
+        weight,
+        extraction.suggested_weight ?? weight,
+        block.id,
+        profileJson,
+      )
+    }
 
     const insertEntityRaw = db.prepare(`
       INSERT INTO entry_entities_raw (id, entry_id, name, type, payload)
@@ -800,12 +1123,6 @@ async function processOneBlock(
       )
     }
 
-    applySpeakerLinks(
-      db,
-      JSON.stringify(entrySpeakerMap),
-      entryId,
-      quantomoId,
-    )
     applyEntryManualTagsAsLinks(
       db,
       JSON.stringify(blockTags),
@@ -813,14 +1130,20 @@ async function processOneBlock(
       quantomoId,
     )
 
-    if (session.primary_person_id) {
+    if (
+      session.primary_person_id &&
+      mentionPersonIds.includes(session.primary_person_id)
+    ) {
       db.prepare(
         `UPDATE entity_links SET role = 'primary'
          WHERE entity_kind = 'person' AND entity_id = ? AND entry_id = ?
            AND role IN ('mentioned', 'participant')`,
       ).run(session.primary_person_id, entryId)
     }
-    if (session.primary_project_id) {
+    if (
+      session.primary_project_id &&
+      mentionProjectIds.includes(session.primary_project_id)
+    ) {
       db.prepare(
         `UPDATE entity_links SET role = 'primary'
          WHERE entity_kind = 'project' AND entity_id = ? AND entry_id = ?
@@ -829,6 +1152,43 @@ async function processOneBlock(
     }
 
     createEntityProposalsFromEntry(db, entryId)
+    applyExactProposalLinks(db, entryId, quantomoId)
+
+    const actions = tasksFromChatExtraction(extraction)
+    if (
+      session.human_weight != null &&
+      !sessionHasConversationTodo(db, session.id)
+    ) {
+      actions.unshift(
+        conversationTodoTask(session.nombre_chat, session.human_weight),
+      )
+    }
+    const insertTask = db.prepare(
+      `INSERT INTO pending_tasks (id, entry_id, task_text, tag, status)
+       VALUES (?, ?, ?, ?, 'suggested')`,
+    )
+    for (const a of actions) {
+      insertTask.run(randomUUID(), entryId, a.task_text, a.tag)
+    }
+
+    harvestUrls(db, blockLinks, {
+      sessionId: session.id,
+      sourceId: block.id,
+      sourceType: 'chat_message',
+      timestamp: block.started_at,
+    })
+    harvestUrls(db, blockLinks, {
+      sessionId: session.id,
+      sourceId: entryId,
+      sourceType: 'entry',
+      timestamp: block.started_at,
+    })
+    harvestUrls(db, blockLinks, {
+      sessionId: session.id,
+      sourceId: quantomoId,
+      sourceType: 'quantomo',
+      timestamp: block.started_at,
+    })
 
     db.prepare(
       `UPDATE chat_blocks SET
@@ -849,6 +1209,8 @@ async function processOneBlock(
         entities: extraction.entities,
         locations: extraction.locations,
         milestones: extraction.milestones,
+        actions,
+        destill,
         suggested_weight: extraction.suggested_weight,
       }),
       block.id,
@@ -897,7 +1259,8 @@ export function listChatSessions(): Array<
           (SELECT COUNT(*) FROM chat_blocks b WHERE b.chat_session_id = s.id) AS block_count,
           (SELECT COUNT(*) FROM link_harvest l WHERE l.chat_session_id = s.id) AS link_count,
           (SELECT COUNT(*) FROM chat_blocks b
-            WHERE b.chat_session_id = s.id AND b.estado = 'pendiente') AS pending_blocks
+            WHERE b.chat_session_id = s.id
+              AND ${PROCESSABLE_BLOCK_SQL}) AS pending_blocks
          FROM chat_sessions s
          ORDER BY s.created_at DESC`,
       )
@@ -978,7 +1341,8 @@ export function getChatSessionDetail(sessionId: string): {
       db
         .prepare(
           `SELECT COUNT(*) AS n FROM chat_blocks
-           WHERE chat_session_id = ? AND estado = 'pendiente'`,
+           WHERE chat_session_id = ?
+             AND ${PROCESSABLE_UNALIASED}`,
         )
         .get(sessionId) as { n: number | bigint }
     ).n ?? 0,
@@ -1271,6 +1635,29 @@ export function updateChatBlock(
     JSON.stringify(links),
     blockId,
   )
+
+  harvestUrls(db, links, {
+    sessionId,
+    sourceId: blockId,
+    sourceType: 'chat_message',
+    timestamp: block.started_at,
+  })
+  if (block.entry_id) {
+    harvestUrls(db, links, {
+      sessionId,
+      sourceId: block.entry_id,
+      sourceType: 'entry',
+      timestamp: block.started_at,
+    })
+  }
+  if (block.quantomo_id) {
+    harvestUrls(db, links, {
+      sessionId,
+      sourceId: block.quantomo_id,
+      sourceType: 'quantomo',
+      timestamp: block.started_at,
+    })
+  }
 
   if (block.entry_id && block.quantomo_id) {
     applyEntryManualTagsAsLinks(
@@ -1567,6 +1954,151 @@ export function assignBlockEntity(
     type: input.type,
     assigned_id: assignedId,
     assigned_name: assignedName,
+  }
+}
+
+function parseJsonValue(raw: string | null | undefined): unknown {
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as unknown
+  } catch {
+    return raw
+  }
+}
+
+export function exportChatConversations(sessionId?: string): {
+  exported_at: string
+  source: 'deprocast-chats'
+  count: number
+  conversations: unknown[]
+} {
+  const db = getDb()
+  const sessions = sessionId
+    ? rows<ChatSession>(
+        db.prepare(`SELECT * FROM chat_sessions WHERE id = ?`).all(sessionId),
+      )
+    : rows<ChatSession>(
+        db.prepare(`SELECT * FROM chat_sessions ORDER BY created_at DESC`).all(),
+      )
+
+  const conversations = sessions.map((session) => {
+    const speakers = hydrateSpeakerMap(
+      db,
+      parseChatSpeakerMap(session.speaker_map_json),
+    )
+    const blocks = rows<ChatBlock>(
+      db
+        .prepare(
+          `SELECT * FROM chat_blocks WHERE chat_session_id = ? ORDER BY started_at ASC`,
+        )
+        .all(session.id),
+    )
+    const messages = rows<ChatMessage>(
+      db
+        .prepare(
+          `SELECT * FROM chat_messages
+           WHERE chat_session_id = ?
+           ORDER BY timestamp_exact ASC, sort_index ASC`,
+        )
+        .all(session.id),
+    )
+    const entryIds = blocks.map((b) => b.entry_id).filter(Boolean) as string[]
+    const quantomoIds = blocks
+      .map((b) => b.quantomo_id)
+      .filter(Boolean) as string[]
+    const entries =
+      entryIds.length === 0
+        ? []
+        : rows(
+            db
+              .prepare(
+                `SELECT id, title, content_raw, timestamp_exact, status, human_weight, speaker_map, manual_tags, original_filename
+                 FROM entries WHERE id IN (${entryIds.map(() => '?').join(',')})`,
+              )
+              .all(...entryIds),
+          )
+    const quantomos =
+      quantomoIds.length === 0
+        ? []
+        : rows<{
+            id: string
+            entry_id: string
+            title: string
+            content: string | null
+            hermetic_weight: number | null
+            human_weight: number | null
+            suggested_weight: number | null
+            stage: string | null
+            source_kind: string | null
+            source_id: string | null
+            profile_json: string | null
+          }>(
+            db
+              .prepare(
+                `SELECT id, entry_id, title, content, hermetic_weight, human_weight, suggested_weight, stage, source_kind, source_id, profile_json
+                 FROM quantomos WHERE id IN (${quantomoIds.map(() => '?').join(',')})`,
+              )
+              .all(...quantomoIds),
+          )
+    const tasks =
+      entryIds.length === 0
+        ? []
+        : rows(
+            db
+              .prepare(
+                `SELECT * FROM pending_tasks WHERE entry_id IN (${entryIds.map(() => '?').join(',')})`,
+              )
+              .all(...entryIds),
+          )
+    const links = rows(
+      db
+        .prepare(`SELECT * FROM link_harvest WHERE chat_session_id = ?`)
+        .all(session.id),
+    )
+    const entityLinks =
+      entryIds.length === 0
+        ? []
+        : rows(
+            db
+              .prepare(
+                `SELECT * FROM entity_links WHERE entry_id IN (${entryIds.map(() => '?').join(',')})`,
+              )
+              .all(...entryIds),
+          )
+
+    return {
+      session: {
+        ...session,
+        participantes: parseJsonArray(session.participantes_json),
+        linked_person_ids: parseJsonArray(session.linked_person_ids_json),
+        linked_project_ids: parseJsonArray(session.linked_project_ids_json),
+        speakers,
+      },
+      blocks: blocks.map((b) => ({
+        ...b,
+        linked_person_ids: parseJsonArray(b.linked_person_ids_json),
+        linked_project_ids: parseJsonArray(b.linked_project_ids_json),
+        linked_entities: parseJsonValue(b.linked_entities_json),
+        links: parseJsonArray(b.links_json),
+        summary: parseJsonValue(b.summary_json),
+      })),
+      messages,
+      entries,
+      quantomos: quantomos.map((q) => ({
+        ...q,
+        profile: parseJsonValue(q.profile_json),
+      })),
+      tasks,
+      entity_links: entityLinks,
+      harvested_links: links,
+    }
+  })
+
+  return {
+    exported_at: new Date().toISOString(),
+    source: 'deprocast-chats',
+    count: conversations.length,
+    conversations,
   }
 }
 

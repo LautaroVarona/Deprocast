@@ -1503,7 +1503,10 @@ Devuelve ÚNICAMENTE un JSON válido (sin markdown):
     }
   ],
   "locations": string[],
-  "milestones": string[]
+  "milestones": string[],
+  "actions": [
+    { "task_text": string, "tag": "todo" | "hito" | "seguimiento" | string }
+  ]
 }
 Reglas:
 - title = 3 a 5 palabras, sin puntuación final.
@@ -1513,6 +1516,7 @@ Reglas:
 - entities = personas nombradas (no remitentes genéricos del propio chat si solo firman) y proyectos creativos/productoras/plataformas (ej. El Fotógrafo, Versa, Studianta, Terreta Hub).
 - locations = zonas/ciudades/lugares logísticos mencionados.
 - milestones = hitos temporales o entregables (escenas, estrenos, ferias).
+- actions = _todos_ accionables del bloque (pocos, reales). tag = todo | hito | seguimiento. Vacío si no hay nada que hacer.
 - Omití ruido NER (calles sueltas sin contexto, interjecciones).
 - Las líneas prefijadas con [IA] son de un modelo, no de una persona física.
 - Solo JSON.`
@@ -1532,6 +1536,7 @@ function mockChatExtraction(transcript: string, chatName: string): ChatExtractio
     entities: [],
     locations: [],
     milestones: [],
+    actions: [],
   }
 }
 
@@ -1579,6 +1584,19 @@ function normalizeChatExtraction(
       : [],
     milestones: Array.isArray(partial.milestones)
       ? partial.milestones.map(String).filter(Boolean)
+      : [],
+    actions: Array.isArray(partial.actions)
+      ? partial.actions
+          .filter(
+            (a) =>
+              a &&
+              typeof a.task_text === 'string' &&
+              a.task_text.trim(),
+          )
+          .map((a) => ({
+            task_text: a.task_text.trim(),
+            tag: String(a.tag || 'todo').trim() || 'todo',
+          }))
       : [],
   }
 }
@@ -1645,7 +1663,8 @@ export async function extractFromChatBlock(input: {
     (input.links ?? []).length
       ? `Links extraídos/anclados:\n${(input.links ?? []).map((u) => `- ${u}`).join('\n')}`
       : '',
-    'Los habladores listados son de TODA la conversación: el quántomo debe atribuirles la voz con sus nombres de perfil.',
+    'Los habladores listados son de TODA la conversación: usá sus nombres de perfil en el relato.',
+    'No los listes como entidades mencionadas solo por estar hablando. Mención = alguien o algo de lo que se habla, no el parlante del día.',
   ]
     .filter(Boolean)
     .join('\n')

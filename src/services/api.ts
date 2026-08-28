@@ -34,6 +34,7 @@ import type {
   ChatBlockEntityView,
   ChatMessage,
   ChatPreview,
+  ChatQueueStatus,
   ChatSession,
   ChatSpeakerMap,
   ChatTipo,
@@ -1960,6 +1961,39 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+
+  startChatProcess: (sessionId?: string, blockId?: string) =>
+    request<
+      ChatQueueStatus & { ok: boolean; queued: number; message: string }
+    >('/api/chats/process/start', {
+      method: 'POST',
+      body: JSON.stringify({
+        session_id: sessionId,
+        block_id: blockId,
+      }),
+    }),
+
+  stopChatProcess: () =>
+    request<ChatQueueStatus & { ok: boolean }>(
+      '/api/chats/process/stop',
+      { method: 'POST', body: '{}' },
+    ),
+
+  getChatProcessStatus: () =>
+    request<ChatQueueStatus & { ok: boolean }>('/api/chats/process/status'),
+
+  exportChats: (sessionId?: string) =>
+    request<{
+      ok: boolean
+      exported_at: string
+      source: string
+      count: number
+      conversations: unknown[]
+    }>(
+      sessionId
+        ? `/api/chats/${encodeURIComponent(sessionId)}/export`
+        : '/api/chats/export',
+    ),
 
   processChat: (id: string, limit = 1, blockId?: string) =>
     request<{

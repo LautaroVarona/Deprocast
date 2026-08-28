@@ -1,4 +1,9 @@
-import type { ChatMessage, ChatSpeakerMap } from '../types.js'
+import type {
+  ChatExtraction,
+  ChatMessage,
+  ChatSpeakerMap,
+  CohereAction,
+} from '../types.js'
 
 export const CHAT_AI_DEFAULT_WEIGHT = 4
 export const CHAT_HUMAN_DEFAULT_WEIGHT = 7
@@ -57,10 +62,53 @@ function parseIsAi(raw: unknown): boolean {
   return false
 }
 
+export function tasksFromChatExtraction(
+  extraction: Pick<ChatExtraction, 'actions' | 'milestones'>,
+): CohereAction[] {
+  const out: CohereAction[] = []
+  const seen = new Set<string>()
+  const push = (task_text: string, tag: string) => {
+    const text = task_text.trim()
+    if (!text) return
+    const key = text.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ task_text: text, tag: tag.trim() || 'todo' })
+  }
+  for (const a of extraction.actions ?? []) {
+    if (!a?.task_text) continue
+    push(a.task_text, a.tag || 'todo')
+  }
+  for (const m of extraction.milestones ?? []) {
+    push(String(m), 'hito')
+  }
+  return out
+}
+
+export function conversationTodoTask(
+  nombre: string,
+  weight: number,
+): CohereAction {
+  return {
+    task_text: `Conversación «${nombre}» · peso ${weight}`,
+    tag: 'todo',
+  }
+}
+
 export function speakersHaveAi(
   speakers: Array<{ is_ai?: boolean | null }>,
 ): boolean {
   return speakers.some((s) => Boolean(s.is_ai))
+}
+
+export function sessionSpeakersReady(
+  speakers: ChatSpeakerMap[] | string | null | undefined,
+): boolean {
+  const list =
+    typeof speakers === 'string' || speakers == null
+      ? parseChatSpeakerMap(speakers)
+      : speakers
+  return list.length > 0 && list.every((s) => Boolean(s.person_id))
 }
 
 export function resolveChatProcessWeight(opts: {

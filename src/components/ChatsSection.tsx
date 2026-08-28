@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from '../services/api'
-import { DeproWeightPicker } from './deprocast/DeproWeightPicker'
+import { downloadJson } from '../utils/downloadJson'
 import {
   ChatJornadaCard,
   monthKeyFromDay,
@@ -27,6 +27,7 @@ import type {
   ChatBlockEntityView,
   ChatMessage,
   ChatPreview,
+  ChatQueueStatus,
   ChatSession,
   ChatSpeakerMap,
   ChatTipo,
@@ -207,6 +208,39 @@ function parseSummary(raw: string): {
   }
 }
 
+function WeightButtons({
+  value,
+  disabled,
+  onPick,
+  label,
+}: {
+  value: number | null
+  disabled?: boolean
+  onPick: (w: number) => void
+  label: string
+}) {
+  return (
+    <div className="chat-criba-vote">
+      <span className="audio-criba-vote-label">{label}</span>
+      <div className="audio-criba-weights" role="group" aria-label={label}>
+        {Array.from({ length: 12 }, (_, i) => i + 1).map((w) => (
+          <button
+            key={w}
+            type="button"
+            className={`btn btn-tiny audio-w${w <= 3 ? ' is-slop' : ''}${
+              value === w ? ' is-on' : ''
+            }`}
+            disabled={disabled}
+            onClick={() => onPick(w)}
+          >
+            {w}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function ChatsSection({ refreshKey, onChanged }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [sessions, setSessions] = useState<ChatSession[]>([])
@@ -250,6 +284,7 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
   const [dropActive, setDropActive] = useState(false)
   const [cribaOpen, setCribaOpen] = useState(false)
   const [sessionTitle, setSessionTitle] = useState('')
+  const [queueStatus, setQueueStatus] = useState<ChatQueueStatus | null>(null)
 
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
@@ -387,6 +422,47 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
     [persons, projects, speakers],
   )
 
+  const refreshQueue = useCallback(async () => {
+    try {
+      const st = await api.getChatProcessStatus()
+      setQueueStatus(st)
+      return st
+    } catch {
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshQueue()
+  }, [refreshQueue, refreshKey])
+
+  useEffect(() => {
+    if (!queueStatus?.running) return
+    const t = window.setInterval(() => {
+      void (async () => {
+        const st = await refreshQueue()
+        if (st && !st.running) {
+          await loadSessions()
+          if (selectedId) await loadDetail(selectedId)
+          setStatus(
+            st.skipped > 0
+              ? `Destilado: ${st.done} al corpus, ${st.skipped} omitidos`
+              : `Listo: ${st.done} chat(s) en el corpus`,
+          )
+          onChanged()
+        }
+      })()
+    }, 1500)
+    return () => window.clearInterval(t)
+  }, [
+    queueStatus?.running,
+    refreshQueue,
+    selectedId,
+    loadSessions,
+    loadDetail,
+    onChanged,
+  ])
+
   function resetImportDraft() {
     setFile(null)
     setPreview(null)
@@ -522,6 +598,101 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
     }
   }
 
+  async function persistConversation(weight?: number | null) {
+    if (!selectedId) return
+    const w = weight === undefined ? sessionWeight : weight
+    await api.patchChat(selectedId, {
+      speaker_map: speakers,
+      primary_person_id: primaryPerson,
+      primary_project_id: primaryProject,
+      person_ids: sessionPeople.map((c) => c.id),
+      project_ids: [
+        ...(primaryProject ? [primaryProject] : []),
+        ...sessionProjects.map((c) => c.id),
+      ],
+      human_weight: w,
+    })
+    if (weight !== undefined) setSessionWeight(weight)
+  }
+
+  async function startDestill(blockId?: string) {
+    if (!selectedId) return
+    if (!allSpeakersMapped(speakers)) {
+      setSpeakersOpen(true)
+      setError(
+        'Asigná los hablantes de la conversación. Van a todos los quántomos.',
+      )
+      return
+    }
+    await persistConversation()
+    const result = await api.startChatProcess(selectedId, blockId)
+    setQueueStatus({ ...result, running: result.queued > 0 || result.running })
+    setStatus(result.message)
+    if (result.queued === 0 && !result.running) {
+      setError(result.message)
+    } else {
+      setError(null)
+    }
+    onChanged()
+  }
+
+  async function handleExport(scope: 'one' | 'all') {
+    setBusy(true)
+    setError(null)
+    try {
+      if (scope === 'one' && !selectedId) {
+        setError('Elegí una conversación para exportar.')
+        return
+      }
+      const payload = await api.exportChats(
+        scope === 'one' ? selectedId! : undefined,
+      )
+      const day = new Date().toISOString().slice(0, 10)
+      const nombre =
+        sessions.find((s) => s.id === selectedId)?.nombre_chat || 'conversacion'
+      const slug =
+        scope === 'one'
+          ? nombre
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/gi, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 40)
+          : 'todas'
+      downloadJson(`deprocast-chats-${slug}-${day}.json`, payload)
+      setStatus(
+        `Exportadas ${payload.count} conversación${payload.count === 1 ? '' : 'es'}`,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Error al exportar')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function voteConversation(weight: number) {
+    if (!selectedId || busy) return
+    setBusy(true)
+    setError(null)
+    try {
+      await persistConversation(weight)
+      const result = await api.startChatProcess(selectedId)
+      setQueueStatus({ ...result, running: result.queued > 0 || result.running })
+      setStatus(
+        result.queued
+          ? `Conversación votada ${weight} · ${result.message}`
+          : `Conversación votada ${weight}. Cribá cada chat o destilá cuando haya votos.`,
+      )
+      await loadSessions()
+      onChanged()
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Error al votar la conversación',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function handleProcessDay(sessionId: string, blockId: string) {
     if (!allSpeakersMapped(speakers)) {
       setSpeakersOpen(true)
@@ -533,17 +704,7 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
     setBusy(true)
     setError(null)
     try {
-      await api.patchChat(sessionId, {
-        speaker_map: speakers,
-        primary_person_id: primaryPerson,
-        primary_project_id: primaryProject,
-        person_ids: sessionPeople.map((c) => c.id),
-        project_ids: [
-          ...(primaryProject ? [primaryProject] : []),
-          ...sessionProjects.map((c) => c.id),
-        ],
-        human_weight: sessionWeight,
-      })
+      await persistConversation()
       await api.patchChatBlock(sessionId, blockId, {
         ...splitBlockChips(blockChips),
         human_weight: blockWeight,
@@ -553,18 +714,13 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
           .map((s) => s.trim())
           .filter(Boolean),
       })
-      const result = await api.processChatBlock(sessionId, blockId)
-      setStatus(
-        result.processed
-          ? `Jornada destilada · queda ${result.remaining} día(s)`
-          : result.errors[0]?.error || 'Nada que procesar',
-      )
-      if (result.errors.length) {
+      const result = await api.startChatProcess(sessionId, blockId)
+      setQueueStatus({ ...result, running: result.queued > 0 || result.running })
+      setStatus(result.message)
+      if (result.errors?.length) {
         setError(result.errors.map((e) => e.error).join(' · '))
       }
       await loadSessions()
-      await loadDetail(sessionId)
-      await loadBlock(sessionId, blockId)
       onChanged()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al procesar')
@@ -787,8 +943,19 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
         null
       if (!next) {
         setCribaOpen(false)
-        setStatus('Criba completa')
+        await persistConversation()
+        const destil = await api.startChatProcess(selectedId)
+        setQueueStatus({
+          ...destil,
+          running: destil.queued > 0 || destil.running,
+        })
+        setStatus(
+          destil.queued
+            ? `Criba completa · ${destil.message}`
+            : 'Criba completa',
+        )
         await loadSessions()
+        onChanged()
         return
       }
       await loadBlock(selectedId, next.id)
@@ -832,7 +999,10 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
   const previewUnmapped = previewSpeakers.filter((s) => !s.person_id).length
   const sessionMapped = allSpeakersMapped(speakers)
   const sessionHasAi = speakersHaveAi(speakers)
-  const cribaPending = blocks.filter((b) => b.estado === 'pendiente')
+  const cribaPending = blocks.filter(
+    (b) =>
+      (b.estado === 'pendiente' || b.estado === 'error') && !b.entry_id,
+  )
   const cribaDone = cribaPending.filter((b) => b.human_weight != null).length
   const blockLinkRows = useMemo(
     () =>
@@ -1074,6 +1244,22 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
             >
               Recargar
             </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={busy || !selectedId}
+              onClick={() => void handleExport('one')}
+            >
+              Exportar JSON
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={busy || sessions.length === 0}
+              onClick={() => void handleExport('all')}
+            >
+              Exportar todas
+            </button>
           </div>
         </div>
 
@@ -1125,6 +1311,22 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
 
         {error && <p className="error-text">{error}</p>}
         {status && <p className="muted mono">{status}</p>}
+        {queueStatus?.running && (
+          <p className="muted mono">
+            Destilando {queueStatus.done}/{queueStatus.target}
+            {queueStatus.current_title
+              ? ` · ${queueStatus.current_title}`
+              : ''}
+          </p>
+        )}
+        {!queueStatus?.running &&
+          (queueStatus?.skipped ?? 0) > 0 &&
+          queueStatus?.errors?.[0] && (
+            <p className="error-text">
+              Destilado: {queueStatus.done} hechos, {queueStatus.skipped}{' '}
+              omitidos · {queueStatus.errors[0].error}
+            </p>
+          )}
 
         <div
           className={[
@@ -1226,6 +1428,10 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                       {speakers
                         .map((s) => s.person_name || s.remitente)
                         .join(' · ') || 'Sin hablantes'}
+                      {cribaPending.some((b) => b.human_weight != null) &&
+                      cribaPending.length > 0
+                        ? ' · hay chats cribados listos para destilar'
+                        : ''}
                     </p>
                   </div>
                   <div className="chat-thread-head-actions">
@@ -1255,6 +1461,18 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                       onClick={() => void openCriba()}
                     >
                       Cribar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={
+                        busy ||
+                        !sessionMapped ||
+                        Boolean(queueStatus?.running)
+                      }
+                      onClick={() => void startDestill()}
+                    >
+                      Destilar con LLM
                     </button>
                     <button
                       type="button"
@@ -1379,6 +1597,20 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                   </p>
                 )}
 
+                <div className="chat-day">
+                  <p className="mono">Conversación</p>
+                  <p className="muted">
+                    El voto de la conversación pondera cada chat y genera un
+                    _todo_ al destilar.
+                  </p>
+                  <WeightButtons
+                    label="Peso de la conversación"
+                    value={sessionWeight}
+                    disabled={busy}
+                    onPick={(w) => void voteConversation(w)}
+                  />
+                </div>
+
                 {selectedBlock ? (
                   <div className="chat-day">
                     <div className="panel-head entity-head">
@@ -1394,6 +1626,22 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                           Validar al corpus
                         </button>
                       )}
+                      {selectedBlock.estado === 'pendiente' &&
+                        cribaPending.filter((b) => b.human_weight != null)
+                          .length > 1 && (
+                          <button
+                            type="button"
+                            className="btn btn-tiny"
+                            disabled={
+                              busy ||
+                              !sessionMapped ||
+                              Boolean(queueStatus?.running)
+                            }
+                            onClick={() => void startDestill()}
+                          >
+                            Destilar cribados con LLM
+                          </button>
+                        )}
                     </div>
                     <p className="muted">
                       Links ya extraídos del hilo. Anclá entidades, anotá, fijá
@@ -1448,10 +1696,11 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                         placeholder="Extraídos del hilo · uno por línea"
                       />
                     </div>
-                    <DeproWeightPicker
+                    <WeightButtons
+                      label="Peso de este chat"
                       value={blockWeight}
                       disabled={busy}
-                      onChange={setBlockWeight}
+                      onPick={setBlockWeight}
                     />
                     {sessionHasAi && (
                       <p className="muted chat-ai-hint">
@@ -1736,10 +1985,11 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
               )}
               {selected && (
                 <>
-                  <DeproWeightPicker
+                  <WeightButtons
+                    label="Peso de la conversación"
                     value={sessionWeight}
                     disabled={busy}
-                    onChange={setSessionWeight}
+                    onPick={(w) => void voteConversation(w)}
                   />
                   <button
                     type="button"
@@ -1747,7 +1997,7 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                     disabled={busy}
                     onClick={() => void saveSessionMeta()}
                   >
-                    Guardar
+                    Guardar hablantes
                   </button>
                 </>
               )}
@@ -1778,18 +2028,31 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                       </span>
                     </h3>
                     <p className="muted">
-                      {cribaDone}/{cribaPending.length || blocks.length} con
-                      voto · {blockMessages.length} msgs
+                      {cribaDone}/{cribaPending.length || blocks.length} chats
+                      con voto
+                      {sessionWeight != null
+                        ? ` · conversación ${sessionWeight}`
+                        : ''}
+                      {' · '}
+                      {blockMessages.length} msgs
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="btn btn-tiny"
-                    disabled={busy}
-                    onClick={() => setCribaOpen(false)}
-                  >
-                    Cerrar
-                  </button>
+                  <div className="chat-criba-head-actions">
+                    <WeightButtons
+                      label="Conversación"
+                      value={sessionWeight}
+                      disabled={busy}
+                      onPick={(w) => void voteConversation(w)}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-tiny"
+                      disabled={busy}
+                      onClick={() => setCribaOpen(false)}
+                    >
+                      Cerrar
+                    </button>
+                  </div>
                 </header>
                 {error && <p className="error-text">{error}</p>}
                 <div className="chat-criba-grid">
@@ -1858,30 +2121,12 @@ export function ChatsSection({ refreshKey, onChanged }: Props) {
                         placeholder="Links · uno por línea"
                       />
                     </label>
-                    <div className="chat-criba-vote">
-                      <span className="audio-criba-vote-label">Peso</span>
-                      <div
-                        className="audio-criba-weights"
-                        role="group"
-                        aria-label="Peso 1 a 12"
-                      >
-                        {Array.from({ length: 12 }, (_, i) => i + 1).map(
-                          (w) => (
-                            <button
-                              key={w}
-                              type="button"
-                              className={`btn btn-tiny audio-w${
-                                w <= 3 ? ' is-slop' : ''
-                              }${blockWeight === w ? ' is-on' : ''}`}
-                              disabled={busy}
-                              onClick={() => void voteCriba(w)}
-                            >
-                              {w}
-                            </button>
-                          ),
-                        )}
-                      </div>
-                    </div>
+                    <WeightButtons
+                      label="Peso de este chat"
+                      value={blockWeight}
+                      disabled={busy}
+                      onPick={(w) => void voteCriba(w)}
+                    />
                   </aside>
                 </div>
               </div>

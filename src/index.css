@@ -11352,15 +11352,7 @@ body:has(.app-shell.is-sentinela-mode) {
 }
 
 .chat-file-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  display: none;
 }
 
 .chat-new-drop {
@@ -11634,6 +11626,20 @@ body:has(.app-shell.is-sentinela-mode) {
   justify-content: space-between;
   align-items: flex-start;
   gap: 1rem;
+}
+
+.chat-criba-head-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.45rem;
+}
+
+.chat-criba-head-actions .chat-criba-vote {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+  align-items: flex-end;
 }
 
 .chat-criba-head h3 {
