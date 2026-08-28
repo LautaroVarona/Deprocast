@@ -101,6 +101,7 @@ export function DialogoSection({
       .then((data) => {
         setMessages((prev) => [...prev, data.user, data.assistant])
         setThread(data.thread)
+        if (data.rag_warning) setError(data.rag_warning)
         void loadThreads()
       })
       .catch((err) => {
@@ -180,6 +181,7 @@ export function DialogoSection({
       const data = await api.postDialogoMessage(selectedId, content)
       setMessages((prev) => [...prev, data.user, data.assistant])
       setThread(data.thread)
+      if (data.rag_warning) setError(data.rag_warning)
       void loadThreads()
     } catch (err) {
       setDraft(content)
@@ -401,6 +403,21 @@ export function DialogoSection({
                     {m.role === 'user' ? 'Vos' : 'Oráculo'}
                   </span>
                   <div className="dialogo-bubble-body">{m.content}</div>
+                  {m.role === 'assistant' &&
+                    (m.citations ?? []).length > 0 && (
+                      <ul className="dialogo-cites">
+                        {(m.citations ?? []).map((c) => (
+                          <li key={`${c.type}:${c.id}`}>
+                            <span className="dialogo-cite-chip">
+                              <span className="dialogo-suggest-kind">
+                                {c.type}
+                              </span>{' '}
+                              {c.label}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                 </div>
               ))}
               {busy && (

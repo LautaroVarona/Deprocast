@@ -535,6 +535,27 @@ export async function closeDialogoThread(
       inserted.push({ id: qid, title: atom.title })
     }
 
+    const insertEntityRaw = db.prepare(`
+      INSERT INTO entry_entities_raw (id, entry_id, name, type, payload)
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    for (const e of extraction.entities) {
+      insertEntityRaw.run(
+        randomUUID(),
+        entryId,
+        e.name,
+        e.type,
+        JSON.stringify({
+          kind: e.kind,
+          category: e.category,
+          status: e.status,
+          locations: extraction.locations,
+          milestones: extraction.milestones,
+        }),
+      )
+    }
+    createEntityProposalsFromEntry(db, entryId)
+
     db.prepare(
       `UPDATE dialogo_threads
        SET status = 'closed', closed_at = ?, hermetic_weight = ?,

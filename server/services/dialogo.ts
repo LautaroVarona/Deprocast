@@ -6,7 +6,14 @@ import { randomUUID } from 'node:crypto'
 import { getDb } from '../db.js'
 import { row, rows } from '../sql.js'
 import { chatWithCorpus } from './cohere.js'
-import { searchGraphContext } from './graph.js'
+import { retrieveOracleContext } from './graph.js'
+import {
+  NO_EVIDENCE_REPLY,
+  citationsFromContext,
+  hasOracleEvidence,
+  parseCitationsJson,
+  type OracleCitation,
+} from '../../shared/oracleRag.js'
 
 export type DialogoEntityRef = {
   type: 'person' | 'project' | 'agrupacion' | 'quantomo' | 'dominio'
@@ -32,6 +39,7 @@ export type DialogoMessage = {
   role: 'user' | 'assistant' | 'system'
   content: string
   created_at: string
+  citations: OracleCitation[]
 }
 
 export type DashboardPin = {
@@ -171,6 +179,7 @@ function buildSystemPrompt(
     'Respondé en español, claro y concreto.',
     'Usá el contexto recuperado del corpus. Si no hay evidencia, decilo; no inventes hechos.',
     'El Corpus premium son quántomos sellados (retículo L72). Proto y pre son materia en maduración, no semillas RAG.',
+    'Citá evidencia con el formato [tipo:id] título (ej. [quantomo:uuid] Título). No cites entries crudas.',
     'No digas que sos un LLM genérico: sos el Oráculo de esta RUN.',
     sectionLine,
     '',
@@ -241,10 +250,12 @@ export function getDialogoThread(id: string): {
     role: string
     content: string
     created_at: string
+    citations_json?: string | null
   }>(
     db
       .prepare(
-        `SELECT id, thread_id, role, content, created_at
+        `SELECT id, thread_id, role, content, created_at,
+                coalesce(citations_json, '[]') AS citations_json
          FROM dialogo_messages
          WHERE thread_id = ?
          ORDER BY created_at ASC`,
@@ -256,6 +267,7 @@ export function getDialogoThread(id: string): {
     role: m.role as DialogoMessage['role'],
     content: m.content,
     created_at: m.created_at,
+    citations: parseCitationsJson(m.citations_json),
   }))
 
   return { thread: mapThread(t), messages }
@@ -344,6 +356,7 @@ export async function postDialogoMessage(
   user: DialogoMessage
   assistant: DialogoMessage
   thread: DialogoThread
+  rag_warning: string | null
 }> {
   const detail = getDialogoThread(threadId)
   if (!detail) {
@@ -365,22 +378,30 @@ export async function postDialogoMessage(
     role: 'user',
     content: text,
     created_at: now,
+    citations: [],
   }
 
   db.prepare(
-    `INSERT INTO dialogo_messages (id, thread_id, role, content, created_at)
-     VALUES (?, ?, 'user', ?, ?)`,
+    `INSERT INTO dialogo_messages (id, thread_id, role, content, created_at, citations_json)
+     VALUES (?, ?, 'user', ?, ?, '[]')`,
   ).run(userMsg.id, threadId, text, now)
 
   const entityLines = detail.thread.entity_refs
     .map((r) => hydrateEntityCard(r))
     .filter((s): s is string => !!s)
   const entityBlock = entityLines.map((l) => `- ${l}`).join('\n')
-  const graphBlock = await searchGraphContext(text)
+  const ctx = await retrieveOracleContext(text)
+  const citations = citationsFromContext(ctx.seeds, ctx.neighbors)
+  const ragWarning =
+    ctx.embedError ||
+    (ctx.mode === 'embed_down'
+      ? 'Embed caído: no se pudo buscar en el corpus semántico.'
+      : null)
+  const evidence = hasOracleEvidence(ctx.seeds, ctx.neighbors)
   const system = buildSystemPrompt(
     detail.thread.section_key,
     entityBlock,
-    graphBlock,
+    ctx.block,
   )
 
   const history = detail.messages
@@ -391,7 +412,9 @@ export async function postDialogoMessage(
     }))
   history.push({ role: 'user', content: text })
 
-  const reply = await chatWithCorpus({ system, messages: history })
+  const reply = evidence
+    ? await chatWithCorpus({ system, messages: history })
+    : NO_EVIDENCE_REPLY
   const assistantAt = new Date().toISOString()
   const assistantMsg: DialogoMessage = {
     id: randomUUID(),
@@ -399,12 +422,19 @@ export async function postDialogoMessage(
     role: 'assistant',
     content: reply,
     created_at: assistantAt,
+    citations: evidence ? citations : [],
   }
 
   db.prepare(
-    `INSERT INTO dialogo_messages (id, thread_id, role, content, created_at)
-     VALUES (?, ?, 'assistant', ?, ?)`,
-  ).run(assistantMsg.id, threadId, reply, assistantAt)
+    `INSERT INTO dialogo_messages (id, thread_id, role, content, created_at, citations_json)
+     VALUES (?, ?, 'assistant', ?, ?, ?)`,
+  ).run(
+    assistantMsg.id,
+    threadId,
+    reply,
+    assistantAt,
+    JSON.stringify(assistantMsg.citations),
+  )
 
   db.prepare(`UPDATE dialogo_threads SET updated_at = ? WHERE id = ?`).run(
     assistantAt,
@@ -415,6 +445,7 @@ export async function postDialogoMessage(
     user: userMsg,
     assistant: assistantMsg,
     thread: { ...detail.thread, updated_at: assistantAt },
+    rag_warning: ragWarning,
   }
 }
 

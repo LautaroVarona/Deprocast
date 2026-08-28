@@ -18,6 +18,10 @@ function delay(ms: number): Promise<void> {
 /** Un 402 de billing pausa embeds el resto del proceso (evita spam en logs). */
 let embedPausedReason: string | null = null
 
+export function getEmbedPausedReason(): string | null {
+  return embedPausedReason
+}
+
 export function hashText(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }

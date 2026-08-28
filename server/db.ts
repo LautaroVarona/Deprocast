@@ -1107,6 +1107,7 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'dialogo_threads', 'closed_at', 'TEXT')
   ensureColumn(database, 'dialogo_threads', 'hermetic_weight', 'INTEGER')
   ensureColumn(database, 'dialogo_threads', 'entry_id', 'TEXT')
+  ensureColumn(database, 'dialogo_messages', 'citations_json', `TEXT NOT NULL DEFAULT '[]'`)
   ensureColumn(database, 'sentinel_agents', 'name', `TEXT NOT NULL DEFAULT ''`)
   database.exec(
     `UPDATE sentinel_agents SET name = code WHERE name IS NULL OR name = ''`,

@@ -1465,6 +1465,11 @@ export interface DialogoMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   created_at: string
+  citations?: Array<{
+    type: 'person' | 'project' | 'quantomo'
+    id: string
+    label: string
+  }>
 }
 
 export interface DashboardPin {

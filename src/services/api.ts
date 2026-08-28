@@ -2892,6 +2892,7 @@ export const api = {
       user: DialogoMessage
       assistant: DialogoMessage
       thread: DialogoThread
+      rag_warning?: string | null
     }>(`/api/dialogo/threads/${id}/messages`, {
       method: 'POST',
       body: JSON.stringify({ content }),

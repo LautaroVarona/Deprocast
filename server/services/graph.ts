@@ -4,9 +4,21 @@
 import { randomUUID } from 'node:crypto'
 import { getDb } from '../db.js'
 import { rows, row } from '../sql.js'
-import { cosineSimilarity, loadEmbeddingNeighbors, searchSimilar } from './embeddings.js'
+import { cosineSimilarity, getEmbedPausedReason, loadEmbeddingNeighbors, searchSimilar } from './embeddings.js'
 import { typeaheadEntities } from './typeahead.js'
 import { getOperatorId } from './entityRelations.js'
+import {
+  ORACLE_ENTITY_SNIPPET,
+  ORACLE_QUANTOMO_SNIPPET,
+  ORACLE_SEED_LIMIT,
+  buildOracleFtsQuery,
+  formatOracleGraphBlock,
+  isSealedQuantomoForRag,
+  ragAllowsObjectType,
+  type OracleNeighbor,
+  type OracleRagMode,
+  type OracleSeed,
+} from '../../shared/oracleRag.js'
 
 /** Marca un par persona↔proyecto para no volver a sugerirlo (X o desvínculo). */
 export function dismissGraphLinkSuggestion(
@@ -146,6 +158,7 @@ function hydrateSeed(
   objectId: string,
   score: number,
 ): { label: string; snippet: string; score: number; type: string; id: string } | null {
+  if (!ragAllowsObjectType(objectType)) return null
   const db = getDb()
   if (objectType === 'person') {
     const p = row<{ name: string; notes: string | null }>(
@@ -161,7 +174,7 @@ function hydrateSeed(
       type: 'person',
       id: objectId,
       label: p.name,
-      snippet: (p.notes ?? '').slice(0, 160),
+      snippet: (p.notes ?? '').slice(0, ORACLE_ENTITY_SNIPPET),
       score,
     }
   }
@@ -179,7 +192,10 @@ function hydrateSeed(
         .get(objectId),
     )
     if (!p) return null
-    const snippet = [p.tactical_focus, p.notes].filter(Boolean).join(' — ').slice(0, 160)
+    const snippet = [p.tactical_focus, p.notes]
+      .filter(Boolean)
+      .join(' — ')
+      .slice(0, ORACLE_ENTITY_SNIPPET)
     return {
       type: 'project',
       id: objectId,
@@ -203,27 +219,12 @@ function hydrateSeed(
         .get(objectId),
     )
     if (!q) return null
-    if (q.recognized !== 1 && (q.stage ?? 'proto') !== 'sealed') return null
+    if (!isSealedQuantomoForRag(q.recognized, q.stage)) return null
     return {
       type: 'quantomo',
       id: objectId,
       label: q.title,
-      snippet: (q.content ?? '').slice(0, 160),
-      score,
-    }
-  }
-  if (objectType === 'entry' || objectType === 'entry_chunk') {
-    const entryId =
-      objectType === 'entry_chunk' ? objectId.split(':')[0] ?? objectId : objectId
-    const e = row<{ title: string; content_raw: string | null }>(
-      db.prepare(`SELECT title, content_raw FROM entries WHERE id = ?`).get(entryId),
-    )
-    if (!e) return null
-    return {
-      type: 'entry',
-      id: entryId,
-      label: e.title,
-      snippet: (e.content_raw ?? '').slice(0, 160),
+      snippet: (q.content ?? '').slice(0, ORACLE_QUANTOMO_SNIPPET),
       score,
     }
   }
@@ -283,28 +284,36 @@ function neighborsForProject(projectId: string): NeighborLine[] {
 
 function neighborsForQuantomo(quantomoId: string): NeighborLine[] {
   const db = getDb()
-  const q = row<{ entry_id: string; entry_title: string }>(
+  const q = row<{ entry_id: string }>(
     db
-      .prepare(
-        `
-      SELECT q.entry_id, e.title AS entry_title
-      FROM quantomos q
-      INNER JOIN entries e ON e.id = q.entry_id
-      WHERE q.id = ?
-      `,
-      )
+      .prepare(`SELECT entry_id FROM quantomos WHERE id = ?`)
       .get(quantomoId),
   )
   if (!q) return []
 
-  const out: NeighborLine[] = [
-    {
-      type: 'entry',
-      id: q.entry_id,
-      label: q.entry_title,
-      via: 'quantomo.entry_id',
-    },
-  ]
+  const out: NeighborLine[] = []
+
+  const siblings = rows<{ id: string; title: string }>(
+    db
+      .prepare(
+        `
+      SELECT id, title FROM quantomos
+      WHERE entry_id = ?
+        AND id != ?
+        AND recognized = 1
+        AND coalesce(stage, 'proto') = 'sealed'
+      `,
+      )
+      .all(q.entry_id, quantomoId),
+  )
+  for (const s of siblings) {
+    out.push({
+      type: 'quantomo',
+      id: s.id,
+      label: s.title,
+      via: 'quantomo.entry_id:sealed',
+    })
+  }
 
   const linked = rows<{
     entity_kind: string
@@ -348,24 +357,46 @@ function neighborsForQuantomo(quantomoId: string): NeighborLine[] {
   return out
 }
 
-/**
- * GraphRAG core: top-3 nodos semánticos + vecinos 1-hop → string para prompt.
- */
-export async function searchGraphContext(query: string): Promise<string> {
-  const q = query.trim()
-  if (!q) {
-    return '## Seeds\n(sin query)\n\n## Neighbors\n(ninguno)'
+function searchSealedQuantomosFts(query: string, limit: number): OracleSeed[] {
+  const ftsQuery = buildOracleFtsQuery(query)
+  if (!ftsQuery) return []
+  const db = getDb()
+  try {
+    const hits = rows<{
+      id: string
+      title: string
+      content: string | null
+      rank: number
+    }>(
+      db
+        .prepare(
+          `
+        SELECT q.id, q.title, q.content, bm25(quantomos_fts) AS rank
+        FROM quantomos_fts f
+        JOIN quantomos q ON q.id = f.quantomo_id
+        WHERE quantomos_fts MATCH ?
+          AND q.recognized = 1
+          AND coalesce(q.stage, 'proto') = 'sealed'
+        ORDER BY rank
+        LIMIT ?
+        `,
+        )
+        .all(ftsQuery, limit),
+    )
+    return hits.map((h) => ({
+      type: 'quantomo' as const,
+      id: h.id,
+      label: h.title,
+      snippet: (h.content ?? '').slice(0, ORACLE_QUANTOMO_SNIPPET),
+      score: Math.min(0.85, Math.max(0.35, 0.85 + h.rank * 0.05)),
+    }))
+  } catch (err) {
+    console.warn('[oracle] quantomos FTS:', err)
+    return []
   }
+}
 
-  const hits = await searchSimilar(q, {
-    types: ['person', 'project', 'quantomo', 'entry', 'entry_chunk'],
-    limit: 3,
-  })
-
-  const seeds = hits
-    .map((h) => hydrateSeed(h.object_type, h.object_id, h.score))
-    .filter((s): s is NonNullable<typeof s> => s !== null)
-
+function collectNeighbors(seeds: OracleSeed[]): OracleNeighbor[] {
   const neighborMap = new Map<string, NeighborLine>()
   for (const seed of seeds) {
     let neigh: NeighborLine[] = []
@@ -374,35 +405,92 @@ export async function searchGraphContext(query: string): Promise<string> {
     else if (seed.type === 'quantomo') neigh = neighborsForQuantomo(seed.id)
 
     for (const n of neigh) {
+      if (!ragAllowsObjectType(n.type)) continue
       const key = `${n.type}:${n.id}`
       if (seeds.some((s) => s.type === n.type && s.id === n.id)) continue
       if (!neighborMap.has(key)) neighborMap.set(key, n)
     }
   }
+  return [...neighborMap.values()]
+}
 
-  const seedLines =
-    seeds.length === 0
-      ? ['(ningún nodo semántico cercano)']
-      : seeds.map(
-          (s) =>
-            `- [${s.type}] ${s.label} (score ${s.score.toFixed(3)})${s.snippet ? `: ${s.snippet}` : ''}`,
-        )
+export type OracleGraphContext = {
+  block: string
+  mode: OracleRagMode
+  embedError: string | null
+  seeds: OracleSeed[]
+  neighbors: OracleNeighbor[]
+}
 
-  const neighbors = [...neighborMap.values()]
-  const neighborLines =
-    neighbors.length === 0
-      ? ['(ninguno)']
-      : neighbors.map(
-          (n) => `- [${n.type}] ${n.label} (via ${n.via})`,
-        )
+export async function retrieveOracleContext(
+  query: string,
+): Promise<OracleGraphContext> {
+  const q = query.trim()
+  const embedError = getEmbedPausedReason()
+  if (!q) {
+    return {
+      block: formatOracleGraphBlock({
+        mode: 'none',
+        embedError,
+        seeds: [],
+        neighbors: [],
+      }),
+      mode: embedError ? 'embed_down' : 'none',
+      embedError,
+      seeds: [],
+      neighbors: [],
+    }
+  }
 
-  return [
-    '## Seeds',
-    ...seedLines,
-    '',
-    '## Neighbors',
-    ...neighborLines,
-  ].join('\n')
+  const hits = await searchSimilar(q, {
+    types: ['quantomo', 'person', 'project'],
+    limit: ORACLE_SEED_LIMIT,
+  })
+
+  const seeds: OracleSeed[] = []
+  const seen = new Set<string>()
+  for (const h of hits) {
+    const seed = hydrateSeed(h.object_type, h.object_id, h.score)
+    if (!seed || !ragAllowsObjectType(seed.type)) continue
+    const key = `${seed.type}:${seed.id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    seeds.push(seed)
+  }
+
+  const hasQuantomo = seeds.some((s) => s.type === 'quantomo')
+  let mode: OracleRagMode = 'semantic'
+  if (!hasQuantomo) {
+    for (const f of searchSealedQuantomosFts(q, ORACLE_SEED_LIMIT)) {
+      const key = `${f.type}:${f.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      seeds.push(f)
+    }
+    if (seeds.some((s) => s.type === 'quantomo')) mode = 'fts'
+  }
+
+  if (seeds.length === 0) {
+    mode = embedError ? 'embed_down' : 'none'
+  }
+
+  const neighbors = collectNeighbors(seeds)
+  return {
+    block: formatOracleGraphBlock({ mode, embedError, seeds, neighbors }),
+    mode,
+    embedError,
+    seeds,
+    neighbors,
+  }
+}
+
+/**
+ * GraphRAG: seeds sellados + vecinos 1-hop → string para prompt.
+ * Sin entries crudas. Usado por Diálogo y Sentinela.
+ */
+export async function searchGraphContext(query: string): Promise<string> {
+  const ctx = await retrieveOracleContext(query)
+  return ctx.block
 }
 
 export interface GraphVizNode {
