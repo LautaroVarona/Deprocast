@@ -44,6 +44,20 @@ function originLabel(p: EntityProposalView): string {
   return parts.length > 0 ? parts.join(' · ') : 'Sin origen'
 }
 
+function varianteHint(p: EntityProposalView): string | null {
+  const variante = String(p.meta.variante ?? '').toLowerCase()
+  const aliasDe = String(p.meta.alias_de ?? p.meta.canonico ?? '').trim()
+  const tipo = String(p.meta.deprocast_tipo ?? '').trim()
+  const bits: string[] = []
+  if (tipo) bits.push(tipo)
+  if (variante === 'apodo') {
+    bits.push(aliasDe ? `apodo de ${aliasDe}` : 'apodo')
+  } else if (variante === 'typo') {
+    bits.push(aliasDe ? `typo de ${aliasDe}` : 'typo / ASR')
+  }
+  return bits.length > 0 ? bits.join(' · ') : null
+}
+
 function highlightMention(text: string, mention: string): ReactNode {
   const needle = mention.trim()
   if (!text || !needle) return text
@@ -297,6 +311,9 @@ export function NerValidationDeck({
                     aria-label="Mención"
                   />
                 </label>
+                {varianteHint(current) ? (
+                  <p className="ner-deck-variant mono">{varianteHint(current)}</p>
+                ) : null}
 
                 <label className="field">
                   <span className="mono">Clasificar</span>

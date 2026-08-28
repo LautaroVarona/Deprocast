@@ -1,0 +1,44 @@
+openapi: 3.0.3
+info:
+  title: Deprocast local API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:3001
+paths:
+  /api/health:
+    get:
+      security: []
+      responses:
+        '200':
+          description: Capabilities booleanas
+  /api/backup/restore:
+    post:
+      security:
+        - LocalToken: []
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: dbCommitted + mediaStatus
+  /api/ingest/audio:
+    post:
+      security:
+        - LocalToken: []
+      responses:
+        '200':
+          description: lote ok
+        '207':
+          description: parcial
+components:
+  securitySchemes:
+    LocalToken:
+      type: apiKey
+      in: header
+      name: X-Deprocast-Token

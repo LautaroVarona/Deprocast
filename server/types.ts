@@ -135,6 +135,16 @@ export type SpeakerAssignment = {
   person_name: string | null
 }
 
+/** WhatsApp remitente → perfil Deprocast (hablador). */
+export type ChatSpeakerMap = {
+  remitente: string
+  person_id: string | null
+  person_name: string | null
+  is_ai?: boolean
+  role?: 'human' | 'assistant'
+  model?: string | null
+}
+
 export type DiarizationUtterance = {
   speaker: number
   start: number
@@ -259,7 +269,7 @@ export interface Bookmark {
 }
 
 export type BookmarkManualTag = {
-  kind: 'person' | 'project' | 'dominio'
+  kind: 'person' | 'project' | 'dominio' | 'agrupacion' | 'geografia'
   entity_id: string
   entity_name: string
 }
@@ -352,6 +362,7 @@ export type PersonKind =
   | 'fisica'
   | 'juridica'
   | 'ficticia'
+  | 'ia'
   | 'abstracta'
   | 'ruido'
   | 'geografia'
@@ -392,6 +403,12 @@ export interface CohereEntity {
   category?: string
   status?: string
   tactical_focus?: string
+  /** Tipo forense Groq (Persona, Proyecto, …). */
+  deprocast_tipo?: string
+  /** canonico | apodo | typo — ayuda a vincular ENR. */
+  variante?: string
+  canonico?: string
+  alias_de?: string
 }
 
 export interface CohereExtraction {
@@ -592,6 +609,11 @@ export interface ChatSession {
   tipo: ChatTipo
   participantes_json: string
   linked_person_ids_json: string
+  linked_project_ids_json?: string
+  speaker_map_json?: string
+  primary_person_id?: string | null
+  primary_project_id?: string | null
+  human_weight?: number | null
   vault_path: string | null
   status: ChatSessionStatus
   created_at: string
@@ -622,6 +644,14 @@ export interface ChatBlock {
   entry_id: string | null
   quantomo_id: string | null
   summary_json: string
+  linked_person_ids_json?: string
+  linked_project_ids_json?: string
+  linked_entities_json?: string
+  human_weight?: number | null
+  notes?: string | null
+  links_json?: string
+  entities_reviewed?: number
+  preview_messages?: ChatMessage[]
 }
 
 export interface LinkHarvest {

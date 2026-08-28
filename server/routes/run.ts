@@ -4,6 +4,8 @@ import {
   newUserRun,
   startRun,
 } from '../services/run.js'
+import { withMaintenance } from '../services/maintenance.js'
+import { aiRateLimit } from '../services/localAuth.js'
 
 export const runRouter = Router()
 
@@ -18,7 +20,7 @@ runRouter.get('/', (_req, res) => {
   }
 })
 
-runRouter.post('/start', (req, res) => {
+runRouter.post('/start', aiRateLimit, (req, res) => {
   try {
     const run = startRun(req.body?.name)
     res.status(201).json({ ok: true, run })
@@ -31,23 +33,27 @@ runRouter.post('/start', (req, res) => {
 })
 
 runRouter.post('/new-user', (req, res) => {
-  try {
-    const result = newUserRun({
-      confirmDestroy: req.body?.confirm_destroy,
-      operatorName: req.body?.operator_name,
-      newName: req.body?.new_name,
-    })
-    res.json({
-      ok: true,
-      filename: result.filename,
-      backup_path: result.backup_path,
-      dump: result.dump,
-      run: result.run,
-    })
-  } catch (err) {
-    console.error('[run/new-user]', err)
-    res.status(400).json({
-      error: err instanceof Error ? err.message : 'NUEVO USUARIO fallido',
-    })
-  }
+  void (async () => {
+    try {
+      const result = await withMaintenance('new-user', () =>
+        newUserRun({
+          confirmDestroy: req.body?.confirm_destroy,
+          operatorName: req.body?.operator_name,
+          newName: req.body?.new_name,
+        }),
+      )
+      res.json({
+        ok: true,
+        filename: result.filename,
+        backup_path: result.backup_path,
+        dump: result.dump,
+        run: result.run,
+      })
+    } catch (err) {
+      console.error('[run/new-user]', err)
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'NUEVO USUARIO fallido',
+      })
+    }
+  })()
 })

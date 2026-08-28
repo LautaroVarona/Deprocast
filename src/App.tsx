@@ -9,6 +9,7 @@ import { CribaPanel } from './components/CribaPanel'
 import { BibliotecaSection } from './components/BibliotecaSection'
 import { ChatsSection } from './components/ChatsSection'
 import { RespaldoSection } from './components/RespaldoSection'
+import { ConfiguracionSection } from './components/ConfiguracionSection'
 import { CalendarioSection } from './components/calendario/CalendarioSection'
 import { AmazonaSection } from './components/AmazonaSection'
 import { MapaSection } from './components/mapa/MapaSection'
@@ -25,7 +26,7 @@ import { NewUserGate } from './components/NewUserGate'
 import { AppFooter } from './components/AppFooter'
 import { DeprocastApp } from './components/deprocast/DeprocastApp'
 import { api } from './services/api'
-import { isDeprocastPath, usePathname } from './lib/path'
+import { isDeprocastPath, navigate, usePathname } from './lib/path'
 import {
   LiveSessionProvider,
   useLiveSession,
@@ -53,6 +54,7 @@ type View =
   | 'dialogo'
   | 'sentinela'
   | 'respaldo'
+  | 'configuracion'
   | 'calendario'
   | 'amazona'
   | 'mapa'
@@ -95,6 +97,7 @@ export default function App() {
   const [projectPending, setProjectPending] = useState(0)
   const [run, setRun] = useState<AppRun | null>(null)
   const [runReady, setRunReady] = useState(false)
+  const [runLoadError, setRunLoadError] = useState<string | null>(null)
   const [entityMode, setEntityMode] = useState<EntityHubMode>('perfiles')
   const [dialogoThreadId, setDialogoThreadId] = useState<string | null>(null)
   const [dialogoSeed, setDialogoSeed] = useState<string | null>(null)
@@ -116,8 +119,11 @@ export default function App() {
     try {
       const data = await api.getRun()
       setRun(data.run)
-    } catch {
-      setRun(null)
+      setRunLoadError(null)
+    } catch (err) {
+      setRunLoadError(
+        err instanceof Error ? err.message : 'No se pudo hablar con la API',
+      )
     } finally {
       setRunReady(true)
     }
@@ -224,6 +230,32 @@ export default function App() {
     )
   }
 
+  if (runLoadError && !run) {
+    return (
+      <div className="new-user-gate">
+        <section className="panel new-user-card">
+          <p className="muted new-user-kicker">Deprocast</p>
+          <h1>API caída</h1>
+          <p className="muted">
+            No es un usuario nuevo: el server no respondió. Arrancá de nuevo
+            con <span className="mono">npm run dev</span> (Node 24 en el PATH).
+          </p>
+          <p className="status-line err">{runLoadError}</p>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setRunReady(false)
+              void loadRun()
+            }}
+          >
+            Reintentar
+          </button>
+        </section>
+      </div>
+    )
+  }
+
   if (!run) {
     return <NewUserGate onStarted={(next) => setRun(next)} />
   }
@@ -258,7 +290,9 @@ export default function App() {
             ? 'app-shell is-biblioteca-mode'
             : view === 'calendario'
               ? 'app-shell is-calendario-mode'
-              : view === 'dashboard' || view === 'dialogo' || view === 'sentinela'
+              : view === 'sentinela'
+                ? 'app-shell is-sentinela-mode'
+                : view === 'dashboard' || view === 'dialogo'
                 ? 'app-shell is-dashboard-mode'
                 : 'app-shell'
       }
@@ -415,6 +449,21 @@ export default function App() {
           >
             Respaldo
           </button>
+          <button
+            type="button"
+            className={navClass('configuracion')}
+            onClick={() => go('configuracion', true)}
+          >
+            Config
+          </button>
+          <button
+            type="button"
+            className="btn btn-tiny"
+            title="Núcleo Deprocast"
+            onClick={() => navigate('/deprocast')}
+          >
+            Núcleo
+          </button>
         </nav>
       </header>
 
@@ -429,6 +478,7 @@ export default function App() {
                 view === 'dialogo' ||
                 view === 'sentinela' ||
                 view === 'respaldo' ||
+                view === 'configuracion' ||
                 view === 'calendario' ||
                 view === 'amazona'
               ? 'stage-validada'
@@ -491,6 +541,8 @@ export default function App() {
           <GraphWorkspace refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'respaldo' ? (
           <RespaldoSection refreshKey={refreshKey} run={run} />
+        ) : view === 'configuracion' ? (
+          <ConfiguracionSection refreshKey={refreshKey} />
         ) : view === 'calendario' ? (
           <CalendarioSection refreshKey={refreshKey} onChanged={bump} run={run} />
         ) : view === 'amazona' ? (

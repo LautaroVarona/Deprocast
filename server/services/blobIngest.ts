@@ -104,44 +104,86 @@ function insertLink(
   entityKind: BlobTagKind,
   entityId: string,
   entryId: string,
-  quantomoId: string,
+  quantomoId: string | null,
   role: string,
   now: string,
 ): boolean {
   const db = getDb()
-  const already = row<{ id: string }>(
+  const already = row<{ id: string; quantomo_id: string | null }>(
     db
       .prepare(
-        `SELECT id FROM entity_links
-         WHERE entity_kind = ? AND entity_id = ? AND entry_id = ?`,
+        `SELECT id, quantomo_id FROM entity_links
+         WHERE entity_kind = ? AND entity_id = ? AND entry_id = ? AND role = ?`,
       )
-      .get(entityKind, entityId, entryId),
+      .get(entityKind, entityId, entryId, role),
   )
-  if (already) return false
+  if (already) {
+    if (quantomoId && !already.quantomo_id) {
+      db.prepare(
+        `UPDATE entity_links SET quantomo_id = ? WHERE id = ?`,
+      ).run(quantomoId, already.id)
+    }
+    return false
+  }
   db.prepare(
     `INSERT INTO entity_links (
       id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(randomUUID(), entityKind, entityId, entryId, quantomoId, role, now)
+  ).run(
+    randomUUID(),
+    entityKind,
+    entityId,
+    entryId,
+    quantomoId,
+    role,
+    now,
+  )
   return true
 }
 
-export function applyEntityMentionTags(
+/** Primer quántomo del entry (preferido para entity_links.quantomo_id). */
+export function primaryQuantomoIdForEntry(entryId: string): string | null {
+  const q = row<{ id: string }>(
+    getDb()
+      .prepare(
+        `SELECT id FROM quantomos WHERE entry_id = ? ORDER BY rowid ASC LIMIT 1`,
+      )
+      .get(entryId),
+  )
+  return q?.id ?? null
+}
+
+/**
+ * Sincroniza menciones @ → entity_links (entry + quantomo).
+ * - Añade links faltantes
+ * - Quita links mentioned/via_agrupacion que ya no están en tags
+ * - Rellena quantomo_id si estaba NULL
+ */
+export function syncEntityMentionTags(
   tags: BlobTag[],
   entryId: string,
-  quantomoId: string,
-  now: string,
+  quantomoId?: string | null,
+  now = new Date().toISOString(),
 ): BlobTag[] {
+  const db = getDb()
+  const qid =
+    (quantomoId && String(quantomoId).trim()) ||
+    primaryQuantomoIdForEntry(entryId)
+
   const applied: BlobTag[] = []
+  const keepKeys = new Set<string>()
+  const keepPersonVia = new Set<string>()
+
   for (const tag of tags) {
     const name = resolveTagName(tag.kind, tag.entity_id, tag.entity_name)
     if (!name) continue
-    insertLink(tag.kind, tag.entity_id, entryId, quantomoId, 'mentioned', now)
+    insertLink(tag.kind, tag.entity_id, entryId, qid, 'mentioned', now)
+    keepKeys.add(`${tag.kind}:${tag.entity_id}`)
     applied.push({ kind: tag.kind, entity_id: tag.entity_id, entity_name: name })
 
     if (tag.kind !== 'agrupacion') continue
     const members = rows<{ person_id: string }>(
-      getDb()
+      db
         .prepare(
           `SELECT person_id FROM agrupacion_members WHERE agrupacion_id = ?`,
         )
@@ -154,13 +196,100 @@ export function applyEntityMentionTags(
         'person',
         m.person_id,
         entryId,
-        quantomoId,
+        qid,
         'via_agrupacion',
         now,
       )
+      keepPersonVia.add(m.person_id)
     }
   }
+
+  const existing = rows<{
+    id: string
+    entity_kind: string
+    entity_id: string
+    role: string
+  }>(
+    db
+      .prepare(
+        `SELECT id, entity_kind, entity_id, role FROM entity_links
+         WHERE entry_id = ? AND role IN ('mentioned', 'via_agrupacion')`,
+      )
+      .all(entryId),
+  )
+
+  const del = db.prepare(`DELETE FROM entity_links WHERE id = ?`)
+  for (const link of existing) {
+    if (link.role === 'mentioned') {
+      const key = `${link.entity_kind}:${link.entity_id}`
+      if (!keepKeys.has(key)) del.run(link.id)
+      continue
+    }
+    if (link.role === 'via_agrupacion' && link.entity_kind === 'person') {
+      if (!keepPersonVia.has(link.entity_id)) del.run(link.id)
+    }
+  }
+
+  if (qid) {
+    db.prepare(
+      `UPDATE entity_links SET quantomo_id = ?
+       WHERE entry_id = ? AND (quantomo_id IS NULL OR quantomo_id = '')
+         AND role IN ('mentioned', 'via_agrupacion', 'speaker', 'ner')`,
+    ).run(qid, entryId)
+  }
+
   return applied
+}
+
+export function applyEntityMentionTags(
+  tags: BlobTag[],
+  entryId: string,
+  quantomoId: string | null,
+  now: string,
+): BlobTag[] {
+  return syncEntityMentionTags(tags, entryId, quantomoId, now)
+}
+
+/** Link genérico NER/aprobación: siempre intenta asociar quantomo del entry. */
+export function ensureEntityEntryLink(opts: {
+  entityKind: string
+  entityId: string
+  entryId: string
+  role?: string
+  quantomoId?: string | null
+  now?: string
+}): string {
+  const db = getDb()
+  const now = opts.now ?? new Date().toISOString()
+  const role = opts.role ?? 'mentioned'
+  const qid =
+    (opts.quantomoId && String(opts.quantomoId).trim()) ||
+    primaryQuantomoIdForEntry(opts.entryId)
+
+  const already = row<{ id: string; quantomo_id: string | null }>(
+    db
+      .prepare(
+        `SELECT id, quantomo_id FROM entity_links
+         WHERE entity_kind = ? AND entity_id = ? AND entry_id = ?`,
+      )
+      .get(opts.entityKind, opts.entityId, opts.entryId),
+  )
+  if (already) {
+    if (qid && !already.quantomo_id) {
+      db.prepare(`UPDATE entity_links SET quantomo_id = ? WHERE id = ?`).run(
+        qid,
+        already.id,
+      )
+    }
+    return already.id
+  }
+  const id = randomUUID()
+  db.prepare(
+    `INSERT INTO entity_links (
+      id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, opts.entityKind, opts.entityId, opts.entryId, qid, role, now)
+  return id
 }
 
 export function listEntryTags(entryId: string): BlobTag[] {

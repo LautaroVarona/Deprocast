@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
-export type MentionKind = 'person' | 'project' | 'agrupacion' | 'dominio'
+export type MentionKind =
+  | 'person'
+  | 'project'
+  | 'agrupacion'
+  | 'dominio'
+  | 'geografia'
 
 export type MentionMenuHit = {
   kind: MentionKind
@@ -14,6 +19,7 @@ export function mentionKindLabel(kind: MentionKind): string {
   if (kind === 'agrupacion') return 'Grupo'
   if (kind === 'project') return 'Proyecto'
   if (kind === 'dominio') return 'Dominio'
+  if (kind === 'geografia') return 'Lugar'
   return 'Persona'
 }
 

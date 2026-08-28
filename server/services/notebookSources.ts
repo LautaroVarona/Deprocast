@@ -12,6 +12,8 @@ import type {
 import { createRequire } from 'node:module'
 import { transcribeAudio } from './deepgram.js'
 import { getPage, listPages, rebuildNotebookIndex } from './notebookPages.js'
+import { waitWhile } from './wait.js'
+import { notebookSourceDir } from './paths.js'
 
 const require = createRequire(import.meta.url)
 
@@ -316,7 +318,7 @@ export function deleteNotebookSource(
   getDb()
     .prepare(`DELETE FROM notebook_sources WHERE id = ? AND notebook_id = ?`)
     .run(sourceId, notebookId)
-  const abs = path.join(notebookVaultDir(notebookId), 'sources', sourceId)
+  const abs = notebookSourceDir(notebookId, sourceId)
   try {
     if (fs.existsSync(abs)) fs.rmSync(abs, { recursive: true, force: true })
   } catch (err) {
@@ -329,8 +331,23 @@ export function deleteNotebookSource(
 
 const processQueue: string[] = []
 let processRunning = false
+let sourcePaused = false
+
+export function pauseSourceProcessing(): void {
+  sourcePaused = true
+  processQueue.length = 0
+}
+
+export function resumeSourceProcessing(): void {
+  sourcePaused = false
+}
+
+export async function waitSourceIdle(ms: number): Promise<void> {
+  await waitWhile(() => processRunning, ms)
+}
 
 export function enqueueSourceProcessing(sourceIds: string[]): void {
+  if (sourcePaused) return
   for (const id of sourceIds) {
     if (!processQueue.includes(id)) processQueue.push(id)
   }
@@ -342,6 +359,10 @@ async function drainSourceQueue(): Promise<void> {
   processRunning = true
   try {
     while (processQueue.length > 0) {
+      if (sourcePaused) {
+        processQueue.length = 0
+        break
+      }
       const id = processQueue.shift()!
       try {
         await processNotebookSource(id)
@@ -386,12 +407,15 @@ async function processNotebookSource(sourceId: string): Promise<void> {
   if (source.kind === 'image') {
     if (!abs || !fs.existsSync(abs)) throw new Error('Imagen ausente en vault')
     const { ingestNotebookImages } = await import('./notebookIngest.js')
+    const { firstMissingMediaSlot } = await import('./notebookPages.js')
+    const orphanSlot = firstMissingMediaSlot(getDb(), source.notebook_id)
     const ingest = await ingestNotebookImages(source.notebook_id, [abs], {
-      mode: 'append',
+      mode: orphanSlot != null ? 'from_slot' : 'append',
+      startSlot: orphanSlot ?? 0,
     })
     updateSource(sourceId, {
       status: 'ready',
-      payload: { ingest },
+      payload: { ingest, repair: orphanSlot != null },
     })
     return
   }

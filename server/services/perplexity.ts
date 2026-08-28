@@ -11,6 +11,8 @@ export type PerplexityResearchResult = {
   model: string
 }
 
+import { AppError } from '../errors.js'
+
 function env(key: string, fallback = ''): string {
   return process.env[key]?.replace(/^["']|["']$/g, '') ?? fallback
 }
@@ -123,7 +125,13 @@ export async function researchWithPerplexity(input: {
 
   const apiKey = env('PERPLEXITY_API_KEY')
   const model = env('PERPLEXITY_MODEL', 'sonar-pro') || 'sonar-pro'
-  if (!apiKey) return mockResearch(topic)
+  if (!apiKey) {
+    throw new AppError(
+      'Perplexity no configurado',
+      503,
+      'CAPABILITY_UNAVAILABLE',
+    )
+  }
 
   const system = systemPromptForAgent(
     input.agentId ?? 'explorador',

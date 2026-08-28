@@ -8,6 +8,7 @@ import {
   type SwToOffscreen,
 } from './protocol'
 import { clearCaptureStore, putChunk, putMeta } from './chunkStore'
+import { authFetch, getExtensionToken } from './auth'
 
 type DgWord = {
   word?: string
@@ -52,6 +53,7 @@ type CaptureSession = {
   utterances: CofreUtterance[]
   mime: string
   stopping: boolean
+  pendingWrites: Set<Promise<void>>
 }
 
 let session: CaptureSession | null = null
@@ -190,6 +192,8 @@ async function connectWs(
     diarize: 'true',
     endpointing: '300',
   })
+  const token = await getExtensionToken()
+  if (token) params.set('token', token)
   const path = cfg.stream_path || '/api/live/stream'
   const url = `${SERVER_ORIGIN.replace(/^http/, 'ws')}${path}?${params.toString()}`
   return new Promise((resolve, reject) => {
@@ -307,7 +311,7 @@ async function startCapture(
 
   let cfg: LiveConfig = {}
   try {
-    const res = await fetch(`${SERVER_ORIGIN}/api/live/config`)
+    const res = await authFetch(`${SERVER_ORIGIN}/api/live/config`)
     if (res.ok) cfg = (await res.json()) as LiveConfig
   } catch {
     /* defaults */
@@ -333,8 +337,19 @@ async function startCapture(
     utterances: [],
     mime,
     stopping: false,
+    pendingWrites: new Set(),
   }
   session = sess
+  void putMeta({
+    startedAt: sess.startedAt,
+    endedAt: sess.startedAt,
+    mime: sess.mime,
+    captureMode: sess.captureMode,
+    includeMic: sess.includeMic,
+    micDenied: sess.micDenied,
+    blocks: [],
+    utterances: [],
+  })
 
   processor.onaudioprocess = (ev) => {
     if (!session || session.ws?.readyState !== WebSocket.OPEN) return
@@ -379,7 +394,12 @@ async function startCapture(
   recorder.ondataavailable = (ev) => {
     if (!ev.data || ev.data.size === 0) return
     const seq = sess.chunkSeq++
-    void putChunk(seq, ev.data)
+    const write = putChunk(seq, ev.data).catch((err) => {
+      console.error('[cofre] putChunk failed', err)
+      throw err
+    })
+    sess.pendingWrites.add(write)
+    void write.finally(() => sess.pendingWrites.delete(write))
   }
 
   recorder.start(TIMESLICE_MS)
@@ -447,6 +467,13 @@ async function stopCapture(): Promise<void> {
   }
 
   await teardownMedia(sess)
+  const writes = await Promise.allSettled([...sess.pendingWrites])
+  const failed = writes.find((w) => w.status === 'rejected')
+  if (failed && failed.status === 'rejected') {
+    throw failed.reason instanceof Error
+      ? failed.reason
+      : new Error('Fallo al persistir chunks')
+  }
   await putMeta({
     startedAt: sess.startedAt,
     endedAt: Date.now(),

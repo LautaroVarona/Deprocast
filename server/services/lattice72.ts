@@ -14,7 +14,49 @@ export const L72_BLOCK = 9
 export const L72_DOMAINS = 8
 export const L72_BYTES = L72_CELLS * 2
 
+const DOMAIN_LABELS = [
+  'Captura',
+  'Criba',
+  'Biblioteca',
+  'Memoria',
+  'Territorio',
+  'Finanzas',
+  'Derecho',
+  'Vitalidad',
+] as const
+
+const IPO_LABELS = ['Input', 'Procesamiento', 'Output'] as const
+const CMA_LABELS = ['Cuerpo', 'Mente', 'Alma'] as const
+
+/** Etiqueta legible del poder L72 (índice 0–71). */
+export function l72PowerLabel(index: number): {
+  index: number
+  visible: string
+  domain: string
+  domainIndex: number
+  oficio: string
+  oficioIndex: number
+} {
+  const i = ((index % L72_CELLS) + L72_CELLS) % L72_CELLS
+  const domainIndex = Math.floor(i / L72_BLOCK)
+  const oficioIndex = i % L72_BLOCK
+  const ipo = IPO_LABELS[Math.floor(oficioIndex / 3)]!
+  const cma = CMA_LABELS[oficioIndex % 3]!
+  return {
+    index: i,
+    visible: String(i + 1).padStart(2, '0'),
+    domain: DOMAIN_LABELS[domainIndex]!,
+    domainIndex,
+    oficio: `${ipo} · ${cma}`,
+    oficioIndex,
+  }
+}
+
 export type QuantomoStage = 'proto' | 'pre' | 'sealed'
+
+/** bit 0: sello aplicado. bit 1: hay hablador IA en la fuente. */
+export const L72_FLAG_SEALED = 1 << 0
+export const L72_FLAG_HAS_AI = 1 << 1
 
 export type LatticeSourceKind =
   | 'dialogo'
@@ -22,6 +64,7 @@ export type LatticeSourceKind =
   | 'audio'
   | 'blob'
   | 'notebook'
+  | 'notebook_l72'
   | 'bookmark'
   | 'manual'
 
@@ -99,6 +142,7 @@ function sourceCode(kind: string): number {
     notebook: 5,
     bookmark: 6,
     manual: 7,
+    notebook_l72: 8,
   }
   return map[kind] ?? 0
 }

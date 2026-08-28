@@ -104,6 +104,35 @@ export function listPages(
   )
 }
 
+/** Slots con image_path en DB cuyo archivo no existe en disco. */
+export function listMissingPageMedia(
+  database: DatabaseSync,
+  notebookId: string,
+): number[] {
+  const missing: number[] = []
+  for (const page of listPages(database, notebookId)) {
+    if (!page.image_path) continue
+    const abs = path.resolve(process.cwd(), page.image_path)
+    if (!fs.existsSync(abs)) missing.push(page.slot_index)
+  }
+  return missing
+}
+
+export function countMissingPageMedia(
+  database: DatabaseSync,
+  notebookId: string,
+): number {
+  return listMissingPageMedia(database, notebookId).length
+}
+
+export function firstMissingMediaSlot(
+  database: DatabaseSync,
+  notebookId: string,
+): number | null {
+  const missing = listMissingPageMedia(database, notebookId)
+  return missing.length > 0 ? missing[0]! : null
+}
+
 export function rebuildNotebookIndex(
   database: DatabaseSync,
   notebookId: string,

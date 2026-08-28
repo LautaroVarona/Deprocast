@@ -28,12 +28,13 @@ interface Props {
   embedded?: boolean
 }
 
-const PROFILE_KINDS: PersonKind[] = ['fisica', 'juridica', 'ficticia']
+const PROFILE_KINDS: PersonKind[] = ['fisica', 'juridica', 'ficticia', 'ia']
 
 const KIND_LABEL: Record<string, string> = {
   fisica: 'Física',
   juridica: 'Jurídica',
   ficticia: 'Ficticia',
+  ia: 'IA',
   abstracta: 'Abstracta',
   ruido: 'Ruido',
   geografia: 'Geografía',
@@ -78,11 +79,13 @@ function normalizeKind(k: unknown): PersonKind {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
   if (s === 'agrupacion' || s === 'ficticio') return 'ficticia'
+  if (s === 'ai' || s === 'ia' || s === 'bot' || s === 'assistant') return 'ia'
   if (
     [
       'fisica',
       'juridica',
       'ficticia',
+      'ia',
       'abstracta',
       'ruido',
       'geografia',
@@ -492,7 +495,9 @@ export function PersonsSection({
     setFormName(w.name)
     const k = normalizeKind(w.kind)
     setFormKind(
-      k === 'fisica' || k === 'juridica' || k === 'ficticia' ? k : 'fisica',
+      k === 'fisica' || k === 'juridica' || k === 'ficticia' || k === 'ia'
+        ? k
+        : 'fisica',
     )
     setFormAliases((w.aliases_list ?? []).join(', '))
     setFormNotes(w.notes ?? '')
@@ -1275,6 +1280,7 @@ export function PersonsSection({
                         <option value="fisica">Física</option>
                         <option value="juridica">Jurídica</option>
                         <option value="ficticia">Ficticia</option>
+                        <option value="ia">IA</option>
                         <option value="geografia">Geografía</option>
                         <option value="abstracta">Abstracta</option>
                         <option value="ruido">Ruido</option>
@@ -1372,6 +1378,7 @@ export function PersonsSection({
                       ['fisica', 'Física'],
                       ['juridica', 'Jurídica'],
                       ['ficticia', 'Ficticia'],
+                      ['ia', 'IA'],
                     ] as const
                   ).map(([value, label]) => (
                     <button
@@ -2475,6 +2482,7 @@ export function PersonsSection({
           { value: 'fisica', label: 'Física' },
           { value: 'juridica', label: 'Jurídica' },
           { value: 'ficticia', label: 'Ficticia' },
+          { value: 'ia', label: 'IA' },
           { value: 'geografia', label: 'Geografía' },
           { value: 'abstracta', label: 'Abstracta' },
           { value: 'ruido', label: 'Ruido' },

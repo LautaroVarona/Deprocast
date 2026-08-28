@@ -18,6 +18,7 @@ import {
   type PersonKind,
 } from './personKinds.js'
 import { refinePersonKind } from './nerGuards.js'
+import type { GroqEntityTipo, KnownNerEntity } from './groqExtractor.js'
 
 export function normalizeName(raw: string): string {
   return raw
@@ -40,6 +41,84 @@ function parseAliases(raw: string | null | undefined): string[] {
     /* ignore */
   }
   return []
+}
+
+/** Léxico compacto para el extractor Groq (typos / apodos → canónico). */
+export function listNerLexicon(
+  db: DatabaseSync,
+  limit = 80,
+): KnownNerEntity[] {
+  const out: KnownNerEntity[] = []
+  const push = (nombre: string, tipo: GroqEntityTipo, aliasesJson?: string | null) => {
+    const n = nombre.trim()
+    if (!n || out.length >= limit) return
+    const aliases = parseAliases(aliasesJson).filter(
+      (a) => a.trim() && normalizeName(a) !== normalizeName(n),
+    )
+    out.push({ nombre: n, tipo, aliases: aliases.slice(0, 6) })
+  }
+
+  const persons = rows<{ name: string; aliases: string }>(
+    db
+      .prepare(
+        `SELECT name, aliases FROM persons
+         WHERE (merged_into IS NULL OR merged_into = '')
+           AND kind IN ('fisica','juridica','ficticia','ia')
+         ORDER BY updated_at DESC
+         LIMIT ?`,
+      )
+      .all(Math.min(40, limit)),
+  )
+  for (const p of persons) push(p.name, 'Persona', p.aliases)
+
+  if (out.length < limit) {
+    const projects = rows<{ title: string; aliases: string | null }>(
+      db
+        .prepare(
+          `SELECT title, aliases FROM projects
+           WHERE (merged_into IS NULL OR merged_into = '')
+           ORDER BY updated_at DESC
+           LIMIT ?`,
+        )
+        .all(Math.min(24, limit - out.length)),
+    )
+    for (const p of projects) push(p.title, 'Proyecto', p.aliases)
+  }
+
+  if (out.length < limit) {
+    try {
+      const agrup = rows<{ name: string }>(
+        db
+          .prepare(
+            `SELECT name FROM agrupaciones ORDER BY updated_at DESC LIMIT ?`,
+          )
+          .all(Math.min(12, limit - out.length)),
+      )
+      for (const a of agrup) push(a.name, 'Agrupacion')
+    } catch {
+      /* tabla puede no existir en boot parcial */
+    }
+  }
+
+  if (out.length < limit) {
+    try {
+      const geos = rows<{ name: string; aliases: string | null }>(
+        db
+          .prepare(
+            `SELECT name, aliases FROM geografia
+             WHERE (merged_into IS NULL OR merged_into = '')
+             ORDER BY updated_at DESC
+             LIMIT ?`,
+          )
+          .all(Math.min(12, limit - out.length)),
+      )
+      for (const g of geos) push(g.name, 'Ubicacion', g.aliases)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return out
 }
 
 function entityKeys(name: string, aliasesJson?: string | null): string[] {
@@ -220,7 +299,11 @@ export function findBestProjectMatch(
 }
 
 function mapRawType(type: string): EntityKind | null {
-  const t = type.toLowerCase().trim()
+  const t = type
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
   if (
     t === 'person' ||
     t === 'persona' ||
@@ -232,8 +315,12 @@ function mapRawType(type: string): EntityKind | null {
     t === 'ficticio' ||
     t === 'abstracta' ||
     t === 'ruido' ||
-    t === 'organización' ||
-    t === 'organizacion'
+    t === 'organizacion' ||
+    t === 'geografia' ||
+    t === 'ubicacion' ||
+    t === 'lugar' ||
+    t === 'location' ||
+    t === 'place'
   ) {
     return 'person'
   }
@@ -244,7 +331,10 @@ function mapRawType(type: string): EntityKind | null {
     t === 'iniciativa' ||
     t === 'tarea' ||
     t === 'reto' ||
-    t === 'concepto'
+    t === 'concepto' ||
+    t === 'artefacto' ||
+    t === 'hito' ||
+    t === 'milestone'
   ) {
     return 'project'
   }
@@ -379,6 +469,16 @@ export function createEntityProposalsFromEntry(
     let matchedId: string | null = null
     let meta: Record<string, unknown> = { ...payload }
 
+    const aliasHint = [
+      typeof payload.alias_de === 'string' ? payload.alias_de : '',
+      typeof payload.canonico === 'string' ? payload.canonico : '',
+    ]
+      .map((s) => s.trim())
+      .find(Boolean)
+
+    const variante =
+      typeof payload.variante === 'string' ? payload.variante : ''
+
     if (kind === 'person') {
       const personKind: PersonKind = refinePersonKind(
         name,
@@ -417,8 +517,16 @@ export function createEntityProposalsFromEntry(
           match_mode: 'none',
         }
       } else {
-        const match = findBestPersonMatch(name, persons)
-        if (match && (match.mode === 'exact' || match.score >= FUZZY_LINK)) {
+        const match =
+          findBestPersonMatch(aliasHint || name, persons) ||
+          (aliasHint && aliasHint !== name
+            ? findBestPersonMatch(name, persons)
+            : null)
+        const linkFloor =
+          variante === 'typo' || variante === 'apodo'
+            ? Math.min(FUZZY_LINK, 0.8)
+            : FUZZY_LINK
+        if (match && (match.mode === 'exact' || match.score >= linkFloor)) {
           proposalType = 'link'
           matchedId = match.person.id
           meta = {
@@ -427,6 +535,7 @@ export function createEntityProposalsFromEntry(
             kind: normalizePersonKind(match.person.kind),
             match_score: match.score,
             match_mode: match.mode,
+            alias_surface: name,
           }
         } else if (match && match.score >= FUZZY_SUGGEST) {
           meta = {
@@ -439,8 +548,16 @@ export function createEntityProposalsFromEntry(
         }
       }
     } else {
-      const match = findBestProjectMatch(name, projects)
-      if (match && (match.mode === 'exact' || match.score >= FUZZY_LINK)) {
+      const match =
+        findBestProjectMatch(aliasHint || name, projects) ||
+        (aliasHint && aliasHint !== name
+          ? findBestProjectMatch(name, projects)
+          : null)
+      const linkFloor =
+        variante === 'typo' || variante === 'apodo'
+          ? Math.min(FUZZY_LINK, 0.8)
+          : FUZZY_LINK
+      if (match && (match.mode === 'exact' || match.score >= linkFloor)) {
         proposalType = 'link'
         matchedId = match.project.id
         meta = {
@@ -450,6 +567,7 @@ export function createEntityProposalsFromEntry(
           status: match.project.status,
           match_score: match.score,
           match_mode: match.mode,
+          alias_surface: name,
         }
       } else {
         meta = {

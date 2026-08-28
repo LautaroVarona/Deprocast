@@ -15,6 +15,8 @@ import type {
   ValidatedFileMetadata,
 } from '../types.js'
 import { parseManualTags } from '../services/bookmarkProcess.js'
+import { collectDescendantIds } from '../services/descendants.js'
+import { vaultEntryDir } from '../services/paths.js'
 import {
   analyzeAudioSilence,
   ensureEnhancedAudio,
@@ -142,14 +144,16 @@ function bundleEntry(entry: Entry, withFileMetadata = false): ProposalBundle {
 
 function collectDescendants(entryId: string): Entry[] {
   const db = getDb()
-  const kids = rows<Entry>(
-    db.prepare(`SELECT * FROM entries WHERE parent_entry_id = ?`).all(entryId),
+  const ids = collectDescendantIds(entryId, (id) =>
+    rows<{ id: string }>(
+      db.prepare(`SELECT id FROM entries WHERE parent_entry_id = ?`).all(id),
+    ).map((r) => r.id),
   )
-  const out: Entry[] = []
-  for (const kid of kids) {
-    out.push(...collectDescendants(kid.id), kid)
-  }
-  return out
+  return ids
+    .map((id) =>
+      row<Entry>(db.prepare(`SELECT * FROM entries WHERE id = ?`).get(id)),
+    )
+    .filter((e): e is Entry => Boolean(e))
 }
 
 function purgeEntryRows(entryId: string): void {
@@ -194,10 +198,8 @@ function deleteEntryCascade(entryId: string, entry: Entry): void {
   }
 
   for (const e of family) {
-    if (!e.vault_path) continue
     try {
-      const abs = path.resolve(process.cwd(), e.vault_path)
-      const dir = path.dirname(abs)
+      const dir = vaultEntryDir(e.id)
       fs.rmSync(dir, { recursive: true, force: true })
     } catch (err) {
       console.warn('[entries] vault cleanup failed:', err)

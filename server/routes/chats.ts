@@ -1,12 +1,17 @@
 import { Router } from 'express'
 import multer from 'multer'
-import type { ChatTipo } from '../types.js'
+import type { BookmarkManualTag, ChatSpeakerMap, ChatTipo } from '../types.js'
 import {
+  assignBlockEntity,
+  deleteChatSession,
+  getChatBlockDetail,
   getChatSessionDetail,
   importChatSession,
   listChatSessions,
   previewChatFile,
   processChatSession,
+  updateChatBlock,
+  updateChatSession,
 } from '../services/chatProcess.js'
 
 export const chatsRouter = Router()
@@ -22,7 +27,7 @@ function parseTipo(raw: unknown): ChatTipo | undefined {
   return undefined
 }
 
-function parsePersonIds(raw: unknown): string[] {
+function parseStringIds(raw: unknown): string[] {
   if (Array.isArray(raw)) return raw.map(String).filter(Boolean)
   if (typeof raw === 'string' && raw.trim()) {
     try {
@@ -36,6 +41,86 @@ function parsePersonIds(raw: unknown): string[] {
     }
   }
   return []
+}
+
+const EXTRA_ENTITY_KINDS = new Set(['dominio', 'agrupacion', 'geografia'])
+
+function parseLinkedEntities(raw: unknown): BookmarkManualTag[] | undefined {
+  if (raw === undefined) return undefined
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(parsed)) return []
+  const out: BookmarkManualTag[] = []
+  const seen = new Set<string>()
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const kind = String(o.kind ?? '').trim()
+    const id = String(o.id ?? o.entity_id ?? '').trim()
+    const name = String(o.name ?? o.entity_name ?? '').trim()
+    if (!id || !EXTRA_ENTITY_KINDS.has(kind)) continue
+    const key = `${kind}:${id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      kind: kind as BookmarkManualTag['kind'],
+      entity_id: id,
+      entity_name: name || id,
+    })
+  }
+  return out
+}
+
+function parseSpeakerMap(raw: unknown): ChatSpeakerMap[] | undefined {
+  let parsed: unknown = raw
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  }
+  if (!Array.isArray(parsed)) return undefined
+  const out: ChatSpeakerMap[] = []
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const remitente = String(o.remitente ?? '').trim()
+    if (!remitente) continue
+    out.push({
+      remitente,
+      person_id:
+        typeof o.person_id === 'string' && o.person_id.trim()
+          ? o.person_id.trim()
+          : null,
+      person_name:
+        typeof o.person_name === 'string' && o.person_name.trim()
+          ? o.person_name.trim()
+          : null,
+    })
+  }
+  return out
+}
+
+function parseOptionalId(raw: unknown): string | null | undefined {
+  if (raw === undefined) return undefined
+  if (raw === null || raw === '') return null
+  const s = String(raw).trim()
+  return s || null
+}
+
+function parseOptionalWeight(raw: unknown): number | null | undefined {
+  if (raw === undefined) return undefined
+  if (raw === null || raw === '') return null
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return undefined
+  return n
 }
 
 chatsRouter.get('/', (_req, res) => {
@@ -93,7 +178,11 @@ chatsRouter.post('/import', upload.single('file'), (req, res) => {
         ? String(req.body.nombre_chat)
         : undefined,
       tipo: parseTipo(req.body?.tipo),
-      person_ids: parsePersonIds(req.body?.person_ids),
+      person_ids: parseStringIds(req.body?.person_ids),
+      project_ids: parseStringIds(req.body?.project_ids),
+      speaker_map: parseSpeakerMap(req.body?.speaker_map),
+      primary_person_id: parseOptionalId(req.body?.primary_person_id),
+      primary_project_id: parseOptionalId(req.body?.primary_project_id),
     })
     res.json({ ok: true, ...result })
   } catch (err) {
@@ -126,6 +215,51 @@ chatsRouter.get('/:id', (req, res) => {
   }
 })
 
+chatsRouter.delete('/:id', (req, res) => {
+  try {
+    const result = deleteChatSession(req.params.id)
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const status =
+      (err as { status?: number }).status ??
+      (msg.includes('no encontrada')
+        ? 404
+        : msg.includes('destilando')
+          ? 409
+          : 500)
+    res.status(status).json({ error: msg })
+  }
+})
+
+chatsRouter.patch('/:id', (req, res) => {
+  try {
+    const session = updateChatSession(req.params.id, {
+      nombre_chat:
+        req.body?.nombre_chat != null
+          ? String(req.body.nombre_chat)
+          : undefined,
+      tipo: parseTipo(req.body?.tipo),
+      speaker_map: parseSpeakerMap(req.body?.speaker_map),
+      person_ids:
+        req.body?.person_ids !== undefined
+          ? parseStringIds(req.body.person_ids)
+          : undefined,
+      project_ids:
+        req.body?.project_ids !== undefined
+          ? parseStringIds(req.body.project_ids)
+          : undefined,
+      primary_person_id: parseOptionalId(req.body?.primary_person_id),
+      primary_project_id: parseOptionalId(req.body?.primary_project_id),
+      human_weight: parseOptionalWeight(req.body?.human_weight),
+    })
+    res.json({ ok: true, session })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(msg.includes('no encontrada') ? 404 : 500).json({ error: msg })
+  }
+})
+
 chatsRouter.post('/:id/process', async (req, res) => {
   const t0 = Date.now()
   console.log('[chats/process] start', req.params.id)
@@ -134,9 +268,13 @@ chatsRouter.post('/:id/process', async (req, res) => {
     const limit =
       limitRaw != null && String(limitRaw).trim() !== ''
         ? Number(limitRaw)
-        : 2
+        : 1
+    const blockId = req.body?.block_id
+      ? String(req.body.block_id)
+      : undefined
     const result = await processChatSession(req.params.id, {
-      limit: Number.isFinite(limit) ? limit : 2,
+      limit: Number.isFinite(limit) ? limit : 1,
+      blockId,
     })
     console.log('[chats/process] done', req.params.id, Date.now() - t0, 'ms')
     res.json({ ok: true, ...result })
@@ -147,6 +285,97 @@ chatsRouter.post('/:id/process', async (req, res) => {
       ? 404
       : msg.includes('ya se está procesando')
         ? 409
+        : 500
+    res.status(status).json({ error: msg })
+  }
+})
+
+chatsRouter.get('/:id/blocks/:blockId', (req, res) => {
+  try {
+    const detail = getChatBlockDetail(req.params.id, req.params.blockId)
+    if (!detail) {
+      res.status(404).json({ error: 'Bloque no encontrado' })
+      return
+    }
+    res.json({ ok: true, ...detail })
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+})
+
+chatsRouter.patch('/:id/blocks/:blockId', (req, res) => {
+  try {
+    const block = updateChatBlock(req.params.id, req.params.blockId, {
+      person_ids:
+        req.body?.person_ids !== undefined
+          ? parseStringIds(req.body.person_ids)
+          : undefined,
+      project_ids:
+        req.body?.project_ids !== undefined
+          ? parseStringIds(req.body.project_ids)
+          : undefined,
+      entities:
+        req.body?.entities !== undefined
+          ? parseLinkedEntities(req.body.entities)
+          : undefined,
+      human_weight: parseOptionalWeight(req.body?.human_weight),
+      notes:
+        req.body?.notes !== undefined ? String(req.body.notes) : undefined,
+      links:
+        req.body?.links !== undefined
+          ? parseStringIds(req.body.links)
+          : undefined,
+    })
+    res.json({ ok: true, block })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(msg.includes('no encontrado') ? 404 : 500).json({ error: msg })
+  }
+})
+
+chatsRouter.post('/:id/blocks/:blockId/process', async (req, res) => {
+  try {
+    const result = await processChatSession(req.params.id, {
+      blockId: req.params.blockId,
+      limit: 1,
+    })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const status = msg.includes('no encontrada')
+      ? 404
+      : msg.includes('ya se está procesando')
+        ? 409
+        : 500
+    res.status(status).json({ error: msg })
+  }
+})
+
+chatsRouter.post('/:id/blocks/:blockId/entities', (req, res) => {
+  try {
+    const typeRaw = String(req.body?.type ?? '')
+    const type = typeRaw === 'project' ? 'project' : 'person'
+    const actionRaw = String(req.body?.action ?? 'link')
+    const action =
+      actionRaw === 'create' || actionRaw === 'reject' ? actionRaw : 'link'
+    const entity = assignBlockEntity(req.params.id, req.params.blockId, {
+      name: String(req.body?.name ?? ''),
+      type,
+      action,
+      entity_id: req.body?.entity_id ? String(req.body.entity_id) : undefined,
+      create_name: req.body?.create_name
+        ? String(req.body.create_name)
+        : undefined,
+    })
+    res.json({ ok: true, entity })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    const status = msg.includes('no encontrado') || msg.includes('no está')
+      ? 404
+      : msg.includes('requerid')
+        ? 400
         : 500
     res.status(status).json({ error: msg })
   }

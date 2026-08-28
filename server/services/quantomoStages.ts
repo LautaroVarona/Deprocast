@@ -7,6 +7,8 @@ import { enqueueEmbed, embedApprovedEntry } from './embeddings.js'
 import { createEntityProposalsFromEntry } from './entityMatch.js'
 import {
   L72_CODEC,
+  L72_FLAG_HAS_AI,
+  L72_FLAG_SEALED,
   bufferToCells,
   clampWeight,
   decodeLattice,
@@ -242,11 +244,13 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
     stage: string | null
     source_kind: string | null
     generation: number | null
+    profile_json: string | null
   }>(
     db
       .prepare(
         `SELECT id, entry_id, title, content, hermetic_weight, human_weight,
-                suggested_weight, universe, stage, source_kind, generation
+                suggested_weight, universe, stage, source_kind, generation,
+                profile_json
          FROM quantomos WHERE id = ?`,
       )
       .get(quantomoId),
@@ -264,6 +268,9 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
 
   const generation = Math.max(1, Number(q.generation ?? 0) + 1)
   const runId = currentRunId()
+  const profile = parseObj(q.profile_json)
+  const flags =
+    L72_FLAG_SEALED | (profile.has_ai ? L72_FLAG_HAS_AI : 0)
   const lattice = sealLattice({
     quantomoId: q.id,
     runId,
@@ -279,7 +286,7 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
       timestamp_iso: entry?.timestamp_exact ?? entry?.created_at ?? null,
       amazona_index: amazonaIndex(q.id),
       graph_degree: graphDegree(q.id, q.entry_id),
-      flags: 1,
+      flags,
       embed_sketch: [],
     },
   })
@@ -325,6 +332,13 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
   }
 
   enqueueEmbed(() => embedApprovedEntry(q.entry_id))
+
+  // Rellenar entity_links sin quantomo (menciones/NER previos al átomo)
+  db.prepare(
+    `UPDATE entity_links SET quantomo_id = ?
+     WHERE entry_id = ? AND (quantomo_id IS NULL OR quantomo_id = '')`,
+  ).run(q.id, q.entry_id)
+
   const out = listQuantomosByStage('sealed').find((x) => x.id === q.id)
   if (!out) throw new Error('No se pudo leer el quántomo sellado')
   return out

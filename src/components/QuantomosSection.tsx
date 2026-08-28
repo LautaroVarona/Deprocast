@@ -18,6 +18,30 @@ type QuantomoRow = Quantomo & {
 type SortMode = 'weight' | 'date' | 'title'
 type Pane = 'quantomos' | 'links'
 type StageFilter = 'sealed' | 'proto' | 'pre' | 'premium' | 'all'
+type SourceKindFilter = 'all' | 'notebook' | 'notebook_l72' | 'other'
+
+function sourceKindLabel(kind: string | null | undefined): string {
+  switch (kind) {
+    case 'notebook':
+      return 'Hoja'
+    case 'notebook_l72':
+      return 'L72 cuaderno'
+    case 'dialogo':
+      return 'Diálogo'
+    case 'chat_import':
+      return 'Chat'
+    case 'audio':
+      return 'Audio'
+    case 'blob':
+      return 'Blob'
+    case 'bookmark':
+      return 'Bookmark'
+    case 'manual':
+      return 'Manual'
+    default:
+      return kind?.trim() || '—'
+  }
+}
 
 function formatTs(iso: string | null): string {
   if (!iso) return '—'
@@ -46,6 +70,8 @@ export function QuantomosSection({ refreshKey }: Props) {
   const [query, setQuery] = useState('')
   const [universeFilter, setUniverseFilter] = useState<string>('all')
   const [stageFilter, setStageFilter] = useState<StageFilter>('sealed')
+  const [sourceKindFilter, setSourceKindFilter] =
+    useState<SourceKindFilter>('all')
   const [sortMode, setSortMode] = useState<SortMode>('weight')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [lattice, setLattice] = useState<{
@@ -138,6 +164,17 @@ export function QuantomosSection({ refreshKey }: Props) {
           (item.universe || 'sin universo').trim() === universeFilter,
       )
     }
+    if (sourceKindFilter === 'notebook') {
+      list = list.filter((item) => item.source_kind === 'notebook')
+    } else if (sourceKindFilter === 'notebook_l72') {
+      list = list.filter((item) => item.source_kind === 'notebook_l72')
+    } else if (sourceKindFilter === 'other') {
+      list = list.filter(
+        (item) =>
+          item.source_kind !== 'notebook' &&
+          item.source_kind !== 'notebook_l72',
+      )
+    }
     if (q) {
       list = list.filter((item) => {
         const hay = [
@@ -146,6 +183,7 @@ export function QuantomosSection({ refreshKey }: Props) {
           item.entry_title,
           item.universe ?? '',
           item.original_filename ?? '',
+          item.source_kind ?? '',
         ]
           .join('\n')
           .toLowerCase()
@@ -167,7 +205,7 @@ export function QuantomosSection({ refreshKey }: Props) {
       sorted.sort((a, b) => a.title.localeCompare(b.title, 'es'))
     }
     return sorted
-  }, [quantomos, query, universeFilter, sortMode])
+  }, [quantomos, query, universeFilter, sourceKindFilter, sortMode])
 
   const selected = useMemo(
     () => filtered.find((q) => q.id === selectedId) ?? null,
@@ -351,6 +389,32 @@ export function QuantomosSection({ refreshKey }: Props) {
               ))}
             </div>
 
+            <div className="filter-rail" role="tablist" aria-label="Origen">
+              {(
+                [
+                  ['all', 'Origen'],
+                  ['notebook', 'Hoja'],
+                  ['notebook_l72', 'L72 cuaderno'],
+                  ['other', 'Otros'],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="tab"
+                  aria-selected={sourceKindFilter === value}
+                  className={
+                    sourceKindFilter === value
+                      ? 'filter-chip is-active'
+                      : 'filter-chip'
+                  }
+                  onClick={() => setSourceKindFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
             <div className="profiles-toolbar">
               <label className="semantic-search">
                 <span className="mono">Buscar</span>
@@ -413,6 +477,7 @@ export function QuantomosSection({ refreshKey }: Props) {
                         <span className="quantomo-row-meta mono">
                           w{q.hermetic_weight ?? '—'}
                           {q.stage ? ` · ${q.stage}` : ''}
+                          {` · ${sourceKindLabel(q.source_kind)}`}
                           {q.universe ? ` · ${q.universe}` : ''}
                           {` · ${q.entry_title}`}
                         </span>
@@ -431,6 +496,7 @@ export function QuantomosSection({ refreshKey }: Props) {
                       <h3>{selected.title}</h3>
                       <p className="mono muted quantomo-inspector-meta">
                         {selected.stage ?? '—'} · peso {selected.hermetic_weight ?? '—'}
+                        {` · ${sourceKindLabel(selected.source_kind)}`}
                         {selected.universe
                           ? ` · universo ${selected.universe}`
                           : ''}

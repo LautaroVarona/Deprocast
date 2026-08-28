@@ -17,6 +17,7 @@ import {
   type BlobTag,
 } from './blobIngest.js'
 import { row } from '../sql.js'
+import { waitWhile } from './wait.js'
 
 export function parseMentionedEntities(raw: unknown): BlobTag[] {
   let parsed: unknown = raw
@@ -195,6 +196,26 @@ let explainRunning = false
 let explainActive: VisionJob | null = null
 const processLogs: ProcessLog[] = []
 const MAX_LOGS = 80
+let notebookPaused = false
+
+export function pauseNotebookWork(reason: string): void {
+  notebookPaused = true
+  visionQueue.length = 0
+  confirmQueue.length = 0
+  explainQueue.length = 0
+  console.warn(`[notebook] pause ${reason}`)
+}
+
+export function resumeNotebookWork(): void {
+  notebookPaused = false
+}
+
+export async function waitNotebookIdle(ms: number): Promise<void> {
+  await waitWhile(
+    () => visionRunning || confirmRunning || explainRunning,
+    ms,
+  )
+}
 
 function pushLog(
   level: ProcessLog['level'],
@@ -225,6 +246,7 @@ export function enqueueNotebookVision(
   notebookId: string,
   slotIndex: number,
 ): void {
+  if (notebookPaused) return
   if (
     visionQueue.some(
       (j) => j.notebookId === notebookId && j.slotIndex === slotIndex,
@@ -434,6 +456,10 @@ async function drainVisionQueue(): Promise<void> {
   visionRunning = true
   try {
     while (visionQueue.length > 0) {
+      if (notebookPaused) {
+        visionQueue.length = 0
+        break
+      }
       const job = visionQueue.shift()!
       visionActive = job
       try {
@@ -895,6 +921,12 @@ export async function confirmNotebookPage(
   const quantomoId = page.quantomo_id || randomUUID()
   const title = (page.title || 'Hoja sin título').trim()
   const weight = clampExplanationWeight(page.explanation_weight) ?? 7
+  const pageProfile = JSON.stringify({
+    layer: 'page',
+    slot_index: slotIndex,
+    numero_logico: page.numero_logico,
+    posicion_visual: page.posicion_visual,
+  })
 
   db.exec('BEGIN')
   try {
@@ -906,9 +938,20 @@ export async function confirmNotebookPage(
       ).run(title, contentRaw, weight, entryId)
       db.prepare(
         `UPDATE quantomos SET title = ?, content = ?, hermetic_weight = ?,
-         human_weight = ?, suggested_weight = ?, recognized = 0, stage = 'pre', universe = 'cuaderno'
+         human_weight = ?, suggested_weight = ?, recognized = 0, stage = 'pre',
+         universe = 'cuaderno', source_kind = 'notebook', source_id = ?,
+         profile_json = ?
          WHERE id = ?`,
-      ).run(title, explanation, weight, weight, weight, quantomoId)
+      ).run(
+        title,
+        explanation,
+        weight,
+        weight,
+        weight,
+        notebookId,
+        pageProfile,
+        quantomoId,
+      )
       db.prepare(`DELETE FROM entry_entities_raw WHERE entry_id = ?`).run(
         entryId,
       )
@@ -936,9 +979,20 @@ export async function confirmNotebookPage(
       db.prepare(
         `INSERT INTO quantomos (
           id, entry_id, title, content, hermetic_weight, universe, recognized,
-          human_weight, suggested_weight
-        ) VALUES (?, ?, ?, ?, ?, 'cuaderno', 0, ?, ?)`,
-      ).run(quantomoId, entryId, title, explanation, weight, weight, weight)
+          human_weight, suggested_weight, stage, source_kind, source_id,
+          profile_json
+        ) VALUES (?, ?, ?, ?, ?, 'cuaderno', 0, ?, ?, 'pre', 'notebook', ?, ?)`,
+      ).run(
+        quantomoId,
+        entryId,
+        title,
+        explanation,
+        weight,
+        weight,
+        weight,
+        notebookId,
+        pageProfile,
+      )
     }
 
     const insertEntity = db.prepare(`

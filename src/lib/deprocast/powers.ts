@@ -61,7 +61,7 @@ const NAMED: Record<number, NamedPower> = {
   4: {
     name: 'Destilador',
     status: 'cargado',
-    notes: 'Cohere extract sobre transcripción.',
+    notes: 'Groq extract + ENR sobre transcripción Deepgram.',
     contract: ipo(
       'Texto fuente.',
       'Título, quántomos, acciones, entidades.',

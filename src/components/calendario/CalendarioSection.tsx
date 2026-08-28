@@ -185,7 +185,11 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
     try {
       const batchId = crypto.randomUUID()
       for (const file of list) {
-        await api.ingestAudioOne(file, { batch_id: batchId })
+        const result = await api.ingestAudioOne(file, { batch_id: batchId })
+        const expectedTitle = file.name.replace(/\.[^.]+$/, '')
+        if (!result.entries.some((e) => e.title === expectedTitle)) {
+          throw new Error(`«${file.name}» no quedó registrado. Abortando el lote.`)
+        }
       }
       await api.runPipeline()
       setIngestStatus(

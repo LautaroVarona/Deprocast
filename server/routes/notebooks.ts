@@ -7,6 +7,7 @@ import { getDb } from '../db.js'
 import type { GraphicElement, Notebook, NotebookPage } from '../types.js'
 import { row, rows } from '../sql.js'
 import {
+  countMissingPageMedia,
   createNotebookRecord,
   deleteNotebook,
   getPage,
@@ -191,6 +192,21 @@ notebooksRouter.post('/:id/send-to-corpus', (req, res) => {
   }
 })
 
+notebooksRouter.post('/:id/convert-l72', async (req, res) => {
+  try {
+    requireProductNotebook(req.params.id)
+    const { convertNotebookToL72 } = await import(
+      '../services/notebookL72Convert.js'
+    )
+    const result = await convertNotebookToL72(req.params.id)
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    const e = err as Error & { status?: number }
+    console.error('[notebooks/convert-l72]', err)
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
 notebooksRouter.post('/:id/validate-all-explanations', (req, res) => {
   try {
     requireProductNotebook(req.params.id)
@@ -233,6 +249,7 @@ notebooksRouter.get('/:id', (req, res) => {
     } catch {
       index = []
     }
+    const media_missing_count = countMissingPageMedia(getDb(), notebook.id)
     const summary = {
       total: pages.length,
       vacias: pages.filter((p) => p.status === 'Vacia').length,
@@ -244,6 +261,7 @@ notebooksRouter.get('/:id', (req, res) => {
       validadas: pages.filter((p) => p.status === 'Validada').length,
       procesadas: pages.filter((p) => p.status === 'Procesada').length,
       with_image: pages.filter((p) => !!p.image_path).length,
+      media_missing_count,
     }
     res.json({
       notebook,
@@ -251,6 +269,7 @@ notebooksRouter.get('/:id', (req, res) => {
       index,
       sources: listNotebookSources(notebook.id),
       summary,
+      media_missing_count,
       vision_queue: getNotebookVisionQueueStatus(notebook.id),
     })
   } catch (err) {
@@ -452,6 +471,57 @@ notebooksRouter.post(
     } catch (err) {
       const e = err as Error & { status?: number }
       console.error('[notebooks/ingest-images]', err)
+      res.status(e.status || 500).json({ error: e.message })
+    }
+  },
+)
+
+/** Reponer PNG/PDF cuando image_path apunta a archivos ausentes (sobrescribe desde slot 0). */
+notebooksRouter.post(
+  '/:id/repair-media',
+  upload.array('files', 160),
+  async (req, res) => {
+    try {
+      requireProductNotebook(req.params.id)
+      const files = (req.files as Express.Multer.File[] | undefined) ?? []
+      if (files.length === 0) {
+        res.status(400).json({ error: 'PDF o imágenes requeridos (campo files)' })
+        return
+      }
+
+      const pdf = files.find((f) =>
+        (f.mimetype || '').includes('pdf') ||
+        f.originalname.toLowerCase().endsWith('.pdf'),
+      )
+      let result: Record<string, unknown>
+      if (pdf) {
+        result = await ingestNotebookPdf(req.params.id, pdf.path)
+      } else {
+        result = await ingestNotebookImages(
+          req.params.id,
+          files.map((f) => f.path),
+          { mode: 'from_slot', startSlot: 0 },
+        )
+      }
+
+      for (const f of files) {
+        try {
+          fs.unlinkSync(f.path)
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const media_missing_count = countMissingPageMedia(getDb(), req.params.id)
+      res.json({
+        ok: true,
+        ...result,
+        media_missing_count,
+        repaired: true,
+      })
+    } catch (err) {
+      const e = err as Error & { status?: number }
+      console.error('[notebooks/repair-media]', err)
       res.status(e.status || 500).json({ error: e.message })
     }
   },
@@ -671,11 +741,7 @@ notebooksRouter.patch('/:id/pages/:slot', (req, res) => {
 
     rebuildNotebookIndex(getDb(), req.params.id)
     const saved = getPage(getDb(), req.params.id, slot)
-    if (
-      saved?.entry_id &&
-      saved.quantomo_id &&
-      body.mentioned_entities !== undefined
-    ) {
+    if (saved?.entry_id && body.mentioned_entities !== undefined) {
       applyEntityMentionTags(
         parseMentionedEntities(body.mentioned_entities),
         saved.entry_id,

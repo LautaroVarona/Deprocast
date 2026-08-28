@@ -6,6 +6,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { getDb } from '../db.js'
 import { row, rows } from '../sql.js'
 import type { Geografia, GeoKind } from '../types.js'
+import { buildAcyclicForest } from './descendants.js'
 
 export const GEO_KINDS = [
   'lugar',
@@ -226,21 +227,9 @@ export function findGeografiaMatch(name: string): Geografia | null {
 
 export function listGeografiaTree(): GeografiaTreeNode[] {
   const all = listGeografiaMasters()
-  const byParent = new Map<string | null, Geografia[]>()
-  for (const g of all) {
-    const key = g.parent_id ?? null
-    const list = byParent.get(key) ?? []
-    list.push(g)
-    byParent.set(key, list)
-  }
-  const build = (parentId: string | null): GeografiaTreeNode[] => {
-    const kids = byParent.get(parentId) ?? []
-    return kids.map((g) => ({
-      ...g,
-      children: build(g.id),
-    }))
-  }
-  return build(null)
+  return buildAcyclicForest(
+    all.map((g) => ({ ...g, parent_id: g.parent_id ?? null })),
+  ) as GeografiaTreeNode[]
 }
 
 function ancestorsOf(id: string): Geografia[] {

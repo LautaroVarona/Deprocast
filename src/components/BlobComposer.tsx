@@ -149,6 +149,14 @@ export function BlobComposer({ onChanged }: Props) {
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (
+        hit.kind !== 'person' &&
+        hit.kind !== 'project' &&
+        hit.kind !== 'agrupacion' &&
+        hit.kind !== 'dominio'
+      ) {
+        return
+      }
       const before = text.slice(0, mentionRange.start)
       const after = text.slice(mentionRange.end)
       const insert = multi ? `@${hit.entity_name} @` : `@${hit.entity_name} `

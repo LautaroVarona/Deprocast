@@ -84,7 +84,7 @@ function searchPersons(
     scope === 'masters'
       ? `AND p.source = 'manual'
          AND (p.status IS NULL OR p.status = 'active')
-         AND p.kind IN ('fisica','juridica','ficticia','agrupacion')`
+         AND p.kind IN ('fisica','juridica','ficticia','ia','agrupacion')`
       : ''
 
   // Prefijo / substring vía índice alias_norm
@@ -166,7 +166,7 @@ function searchPersons(
         score: Math.round((scores.get(id) ?? 0) * 1000) / 1000,
       }
     })
-    .filter((x): x is TypeaheadHit => x !== null)
+    .filter((x) => x !== null)
 }
 
 function searchProjects(
@@ -255,7 +255,7 @@ function searchProjects(
         score: Math.round((scores.get(id) ?? 0) * 1000) / 1000,
       }
     })
-    .filter((x): x is TypeaheadHit => x !== null)
+    .filter((x) => x !== null)
 }
 
 function searchQuantomos(
@@ -334,7 +334,7 @@ function searchQuantomos(
         score: Math.round((scores.get(id) ?? 0) * 1000) / 1000,
       }
     })
-    .filter((x): x is TypeaheadHit => x !== null)
+    .filter((x) => x !== null)
 }
 
 function searchAgrupaciones(qNorm: string, limit: number): TypeaheadHit[] {

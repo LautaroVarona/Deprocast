@@ -123,7 +123,14 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
           setStatus(`Subiendo ${i + 1}/${files.length}: ${f.name} (${mb} MB)`)
           console.log(`[freezone] upload ${i + 1}/${files.length}`, f.name, mb)
           const result = await api.ingestAudioOne(f, meta)
-          uploaded += result.entries.length
+          const expectedTitle = f.name.replace(/\.[^.]+$/, '')
+          const hit = result.entries.find((e) => e.title === expectedTitle)
+          if (!hit) {
+            throw new Error(
+              `«${f.name}» no quedó registrado. Abortando el lote para no perder el resto.`,
+            )
+          }
+          uploaded += 1
           // quitar de la selección a medida que sube
           setSelected((prev) =>
             prev.filter((x) => !(x.name === f.name && x.size === f.size)),

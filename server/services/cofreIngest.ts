@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { getDb, getTrincheraNotebookId } from '../db.js'
 import type { DiarizationPayload, DiarizationUtterance } from '../types.js'
 import { analyzeAudioSilence } from './audioAnalysis.js'
+import { sanitizePersistUrl } from './urlSanitize.js'
 
 const VAULT_ROOT = path.resolve(process.cwd(), 'vault')
 
@@ -116,7 +117,7 @@ function parseTabs(raw: unknown): Array<{
   }> = []
   for (const item of raw as ManifestTab[]) {
     if (!item || typeof item !== 'object') continue
-    const url = typeof item.url === 'string' ? item.url : ''
+    const url = sanitizePersistUrl(typeof item.url === 'string' ? item.url : '')
     if (!url.startsWith('http://') && !url.startsWith('https://')) continue
     out.push({
       at: asNum(item.at) ?? Date.now(),

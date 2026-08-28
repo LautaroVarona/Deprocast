@@ -1,4 +1,5 @@
 # Rumbo — Deprocast + El Cofre
+<!-- status: design / no current. Ver README.md para setup. -->
 
 ```text
 documento   : rumbo.md

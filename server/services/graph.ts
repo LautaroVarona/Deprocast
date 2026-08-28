@@ -4,7 +4,7 @@
 import { randomUUID } from 'node:crypto'
 import { getDb } from '../db.js'
 import { rows, row } from '../sql.js'
-import { cosineSimilarity, searchSimilar } from './embeddings.js'
+import { cosineSimilarity, loadEmbeddingNeighbors, searchSimilar } from './embeddings.js'
 import { typeaheadEntities } from './typeahead.js'
 import { getOperatorId } from './entityRelations.js'
 
@@ -939,44 +939,56 @@ export function getGraphSnapshot(opts?: {
     }),
   )
 
-  for (let i = 0; i < idList.length; i++) {
-    const a = idList[i]!
-    const va = vectors.get(a)!
-    const scored: Array<{ id: string; sim: number }> = []
-    for (let j = 0; j < idList.length; j++) {
-      if (i === j) continue
-      const b = idList[j]!
-      const vb = vectors.get(b)!
-      const sim = cosineSimilarity(va, vb)
-      if (sim >= SEM_MIN) scored.push({ id: b, sim })
+  const cached = loadEmbeddingNeighbors().filter(
+    (n) => nodeIds.has(n.object_id) && nodeIds.has(n.neighbor_id),
+  )
+  const neighborHits: Array<{ a: string; b: string; sim: number }> = []
+  if (cached.length > 0) {
+    for (const n of cached) {
+      neighborHits.push({ a: n.object_id, b: n.neighbor_id, sim: n.similarity })
     }
-    scored.sort((x, y) => y.sim - x.sim)
-    for (const hit of scored.slice(0, TOP_K)) {
-      const pairKey = a < hit.id ? `${a}|${hit.id}` : `${hit.id}|${a}`
-      if (existingPair.has(pairKey)) {
-        // Anotar similitud en arista visible existente
-        const vis = links.find((l) => {
-          const s = String(l.source)
-          const t = String(l.target)
-          return (
-            (s === a && t === hit.id) ||
-            (s === hit.id && t === a)
-          )
-        })
-        if (vis && vis.similarity == null) vis.similarity = hit.sim
-        continue
+  } else {
+    for (let i = 0; i < idList.length; i++) {
+      const a = idList[i]!
+      const va = vectors.get(a)!
+      const scored: Array<{ id: string; sim: number }> = []
+      for (let j = 0; j < idList.length; j++) {
+        if (i === j) continue
+        const b = idList[j]!
+        const vb = vectors.get(b)!
+        const sim = cosineSimilarity(va, vb)
+        if (sim >= SEM_MIN) scored.push({ id: b, sim })
       }
-      existingPair.add(pairKey)
-      links.push({
-        id: `sem:${pairKey}`,
-        source: a,
-        target: hit.id,
-        kind: 'semantic',
-        weight: hit.sim,
-        similarity: hit.sim,
-      })
-      semanticCount += 1
+      scored.sort((x, y) => y.sim - x.sim)
+      for (const hit of scored.slice(0, TOP_K)) {
+        neighborHits.push({ a, b: hit.id, sim: hit.sim })
+      }
     }
+  }
+
+  for (const hit of neighborHits) {
+    const a = hit.a
+    const b = hit.b
+    const pairKey = a < b ? `${a}|${b}` : `${b}|${a}`
+    if (existingPair.has(pairKey)) {
+      const vis = links.find((l) => {
+        const s = String(l.source)
+        const t = String(l.target)
+        return (s === a && t === b) || (s === b && t === a)
+      })
+      if (vis && vis.similarity == null) vis.similarity = hit.sim
+      continue
+    }
+    existingPair.add(pairKey)
+    links.push({
+      id: `sem:${pairKey}`,
+      source: a,
+      target: b,
+      kind: 'semantic',
+      weight: hit.sim,
+      similarity: hit.sim,
+    })
+    semanticCount += 1
   }
 
   // Rellenar similitud en confirmados/sugeridos cuando ambos tienen vector

@@ -24,6 +24,10 @@ import {
 } from './cohere.js'
 import { transcribeAudio } from './deepgram.js'
 import {
+  primaryQuantomoIdForEntry,
+  syncEntityMentionTags,
+} from './blobIngest.js'
+import {
   createEntityProposalsFromEntry,
   findBestPersonMatch,
   findBestProjectMatch,
@@ -370,9 +374,13 @@ export function parseManualTags(raw: string | null | undefined): BookmarkManualT
           ? 'project'
           : o.kind === 'dominio'
             ? 'dominio'
-            : o.kind === 'person'
-              ? 'person'
-              : null
+            : o.kind === 'agrupacion'
+              ? 'agrupacion'
+              : o.kind === 'geografia'
+                ? 'geografia'
+                : o.kind === 'person'
+                  ? 'person'
+                  : null
       const entity_id = String(o.entity_id ?? '').trim()
       const entity_name = String(o.entity_name ?? '').trim()
       if (!kind || !entity_id || !entity_name) continue
@@ -384,53 +392,37 @@ export function parseManualTags(raw: string | null | undefined): BookmarkManualT
   }
 }
 
-/** Vincula tags @ de criba al entry (idempotente). */
+/** Vincula tags @ de criba al entry + quántomo (sync; rellena quantomo_id). */
 export function applyManualTagsAsLinks(
   db: DatabaseSync,
   bookmark: Pick<Bookmark, 'manual_tags'>,
   entryId: string,
   quantomoId: string | null,
 ): number {
-  const tags = parseManualTags(bookmark.manual_tags)
-  if (tags.length === 0) return 0
-  const now = new Date().toISOString()
-  const insert = db.prepare(`
-    INSERT INTO entity_links (
-      id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at
-    ) VALUES (?, ?, ?, ?, ?, 'mentioned', ?)
-  `)
-  let linked = 0
-  for (const tag of tags) {
-    if (tag.kind === 'person') {
-      const exists = db.prepare(`SELECT id FROM persons WHERE id = ?`).get(tag.entity_id)
-      if (!exists) continue
-    } else if (tag.kind === 'project') {
-      const exists = db.prepare(`SELECT id FROM projects WHERE id = ?`).get(tag.entity_id)
-      if (!exists) continue
-    } else if (tag.kind === 'dominio') {
-      const exists = db.prepare(`SELECT id FROM dominios WHERE id = ?`).get(tag.entity_id)
-      if (!exists) continue
-    } else {
-      continue
+  void db
+  const tags = parseManualTags(bookmark.manual_tags).flatMap((tag) => {
+    if (
+      tag.kind !== 'person' &&
+      tag.kind !== 'project' &&
+      tag.kind !== 'agrupacion' &&
+      tag.kind !== 'dominio'
+    ) {
+      return []
     }
-    const already = db
-      .prepare(
-        `SELECT id FROM entity_links
-         WHERE entity_kind = ? AND entity_id = ? AND entry_id = ?`,
-      )
-      .get(tag.kind, tag.entity_id, entryId)
-    if (already) continue
-    insert.run(
-      randomUUID(),
-      tag.kind,
-      tag.entity_id,
-      entryId,
-      quantomoId,
-      now,
-    )
-    linked += 1
-  }
-  return linked
+    return [
+      {
+        kind: tag.kind,
+        entity_id: tag.entity_id,
+        entity_name: tag.entity_name,
+      },
+    ]
+  })
+  const applied = syncEntityMentionTags(
+    tags,
+    entryId,
+    quantomoId || primaryQuantomoIdForEntry(entryId),
+  )
+  return applied.length
 }
 
 function withOperatorNote(base: string, note: string | null | undefined): string {

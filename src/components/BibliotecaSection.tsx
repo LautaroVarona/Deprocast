@@ -144,7 +144,9 @@ export function BibliotecaSection({
     validadas?: number
     procesadas: number
     with_image: number
+    media_missing_count?: number
   } | null>(null)
+  const [mediaMissingCount, setMediaMissingCount] = useState(0)
   const [visionQueue, setVisionQueue] = useState<NotebookQueueStatus>({
     running: false,
     pending: 0,
@@ -160,14 +162,17 @@ export function BibliotecaSection({
   const [indexQuery, setIndexQuery] = useState('')
   const [creating, setCreating] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [repairingMedia, setRepairingMedia] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [fullReading, setFullReading] = useState(false)
   const [explaining, setExplaining] = useState(false)
   const [sendingCorpus, setSendingCorpus] = useState(false)
+  const [convertingL72, setConvertingL72] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [readModalOpen, setReadModalOpen] = useState(false)
   const [readModalMinimized, setReadModalMinimized] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
+  const repairMediaInputRef = useRef<HTMLInputElement>(null)
 
   const selected = useMemo(
     () => notebooks.find((n) => n.id === selectedId) ?? null,
@@ -193,6 +198,9 @@ export function BibliotecaSection({
     setIndex(res.index)
     setSources(res.sources ?? [])
     setSummary(res.summary)
+    setMediaMissingCount(
+      res.media_missing_count ?? res.summary.media_missing_count ?? 0,
+    )
     setVisionQueue({
       running: res.vision_queue.running,
       pending: res.vision_queue.pending,
@@ -482,6 +490,50 @@ export function BibliotecaSection({
     }
   }
 
+  const onRepairMedia = async (filesInput: FileList | File[] | null) => {
+    if (!selectedId || !filesInput) return
+    const files = Array.isArray(filesInput)
+      ? filesInput
+      : Array.from(filesInput)
+    if (files.length === 0) return
+    setRepairingMedia(true)
+    setError(null)
+    try {
+      const res = await api.repairNotebookMedia(selectedId, files)
+      setMediaMissingCount(res.media_missing_count ?? 0)
+      if (res.warning) setError(res.warning)
+      await loadDetail(selectedId)
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error al reponer media')
+    } finally {
+      setRepairingMedia(false)
+      if (repairMediaInputRef.current) repairMediaInputRef.current.value = ''
+    }
+  }
+
+  const startConvertL72 = async () => {
+    if (!selectedId) return
+    const ok = window.confirm(
+      '¿Generar los 72 Quantomos L72 del cuaderno?\nUsa las hojas ya en corpus como referencia, reemplaza un pack L72 previo y los sella/vectoriza.',
+    )
+    if (!ok) return
+    setConvertingL72(true)
+    setError(null)
+    try {
+      const res = await api.convertNotebookL72(selectedId)
+      window.alert(
+        `Convertidor L72: ${res.sealed}/72 sellados` +
+          (res.replaced > 0 ? ` (reemplazó ${res.replaced} previos)` : ''),
+      )
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Error en convertidor L72')
+    } finally {
+      setConvertingL72(false)
+    }
+  }
+
   const openPageAnalysis = (slotIndex: number) => {
     setValidateSlot(slotIndex)
     setMode('validate')
@@ -563,6 +615,8 @@ export function BibliotecaSection({
     fullReading ||
     explaining ||
     sendingCorpus ||
+    convertingL72 ||
+    repairingMedia ||
     visionQueue.running ||
     visionQueue.pending > 0 ||
     visionQueue.confirm_running ||
@@ -630,6 +684,11 @@ export function BibliotecaSection({
           ? 'No hay hojas aprobadas para enviar'
           : `Generá explicaciones primero (${validadasSinExplicacion} sin IA)`
     : 'Envío directo (peso 7 si no valoraste). Preferí Validar explicaciones.'
+
+  const canConvertL72 = selected?.index_status === 'completo'
+  const convertL72Title = canConvertL72
+    ? 'Destila 72 Quantomos L72 del cuaderno completo (usa hojas en corpus como referencia)'
+    : 'Disponible cuando el índice del cuaderno está completo'
 
   if (mode === 'validate' && selected) {
     return (
@@ -809,6 +868,17 @@ export function BibliotecaSection({
             </button>
             <button
               type="button"
+              className="btn btn-tiny btn-primary"
+              disabled={!canConvertL72 || convertingL72 || jobsBusy}
+              title={convertL72Title}
+              onClick={() => void startConvertL72()}
+            >
+              {convertingL72
+                ? 'Convirtiendo L72…'
+                : 'Convertidor de Quantomos'}
+            </button>
+            <button
+              type="button"
               className="btn btn-tiny"
               disabled={exporting}
               onClick={() => void startExport()}
@@ -819,6 +889,28 @@ export function BibliotecaSection({
         </div>
 
         {error && <p className="nb-error">{error}</p>}
+        {mediaMissingCount > 0 && (
+          <div className="nb-media-banner">
+            <p className="nb-pipeline-hint">
+              {mediaMissingCount} imagen(es) referenciadas pero ausentes en vault.
+              Reponé el PDF o las fotos para ver las hojas.
+            </p>
+            <label className="btn btn-tiny btn-primary">
+              {repairingMedia ? 'Reponiendo…' : 'Reponer media'}
+              <input
+                ref={repairMediaInputRef}
+                type="file"
+                accept="application/pdf,image/*"
+                multiple
+                hidden
+                disabled={repairingMedia || uploading}
+                onChange={(e) => {
+                  void onRepairMedia(e.target.files)
+                }}
+              />
+            </label>
+          </div>
+        )}
         {(pendingVal > 0 || pendingOcr > 0) && (
           <p className="muted nb-pipeline-hint">
             {pendingOcr > 0
@@ -992,10 +1084,27 @@ export function BibliotecaSection({
                           p.slot_index,
                         )}
                         alt={pageLabel(p)}
+                        onError={(e) => {
+                          const el = e.currentTarget
+                          el.style.display = 'none'
+                          const sibling = el.nextElementSibling
+                          if (
+                            sibling instanceof HTMLElement &&
+                            sibling.classList.contains('nb-face-empty')
+                          ) {
+                            sibling.hidden = false
+                          }
+                        }}
                       />
-                    ) : (
-                      <div className="nb-face-empty">Sin imagen</div>
-                    )}
+                    ) : null}
+                    <div
+                      className="nb-face-empty"
+                      hidden={Boolean(p.image_path)}
+                    >
+                      {p.image_path
+                        ? 'Media ausente — reponer'
+                        : 'Sin imagen'}
+                    </div>
                   </button>
                   <footer className="nb-face-foot">
                     <button

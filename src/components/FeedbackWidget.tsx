@@ -16,6 +16,7 @@ const VIEW_LABELS: Record<string, string> = {
   chats: 'Chats',
   dialogo: 'Diálogo',
   respaldo: 'Respaldo',
+  configuracion: 'Configuración',
   calendario: 'Calendario',
   amazona: 'AmazonA',
   mapa: 'Mapa',

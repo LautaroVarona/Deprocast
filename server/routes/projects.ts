@@ -22,6 +22,7 @@ import {
 } from '../services/projectMatchmaker.js'
 import { liveSuggestedProjectMatch, expandMentionContext } from '../services/entityMatch.js'
 import { typeaheadEntities } from '../services/typeahead.js'
+import { ensureEntityEntryLink } from '../services/blobIngest.js'
 
 export const projectsRouter = Router()
 
@@ -104,19 +105,30 @@ function aliasesList(p: Project): string[] {
 
 projectsRouter.get('/', (_req, res) => {
   const db = getDb()
-  const linkCount = db.prepare(
-    `SELECT COUNT(*) as c FROM entity_links WHERE entity_kind = 'project' AND entity_id = ?`,
+  const linkCounts = rows<{ entity_id: string; c: number }>(
+    db
+      .prepare(
+        `SELECT entity_id, COUNT(*) as c FROM entity_links
+         WHERE entity_kind = 'project' GROUP BY entity_id`,
+      )
+      .all(),
   )
-  const personCount = db.prepare(
-    `SELECT COUNT(*) as c FROM person_project_links WHERE project_id = ?`,
+  const personCounts = rows<{ project_id: string; c: number }>(
+    db
+      .prepare(
+        `SELECT project_id, COUNT(*) as c FROM person_project_links GROUP BY project_id`,
+      )
+      .all(),
   )
+  const linkMap = new Map(linkCounts.map((r) => [r.entity_id, r.c]))
+  const personMap = new Map(personCounts.map((r) => [r.project_id, r.c]))
 
   const profiles = listMasterProjects(db).map((p) => ({
     ...p,
     category: normalizeProjectKind(p.category),
     aliases_list: aliasesList(p),
-    link_count: rowRequired<{ c: number }>(linkCount.get(p.id)).c,
-    person_count: rowRequired<{ c: number }>(personCount.get(p.id)).c,
+    link_count: linkMap.get(p.id) ?? 0,
+    person_count: personMap.get(p.id) ?? 0,
   }))
 
   const waiting = buildWaitingWithMatches(db)
@@ -891,11 +903,13 @@ projectsRouter.post('/proposals/:id/approve', (req, res) => {
          AND type IN ('project', 'proyecto', 'tarea', 'reto', 'concepto')`,
     ).run(title, proposal.entry_id, originalTitle)
 
-    const linkId = randomUUID()
-    db.prepare(
-      `INSERT INTO entity_links (id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at)
-       VALUES (?, 'project', ?, ?, NULL, 'mentioned', ?)`,
-    ).run(linkId, projectId, proposal.entry_id, now)
+    const linkId = ensureEntityEntryLink({
+      entityKind: 'project',
+      entityId: projectId,
+      entryId: proposal.entry_id,
+      role: 'ner',
+      now,
+    })
 
     db.exec('COMMIT')
 

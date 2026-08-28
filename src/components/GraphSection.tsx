@@ -148,6 +148,7 @@ function passesLayer(n: GraphVizNode, s: GraphSettings['layers']): boolean {
     if (k === 'fisica' && !s.personFisica) return false
     if (k === 'juridica' && !s.personJuridica) return false
     if ((k === 'ficticia' || k === 'agrupacion') && !s.personFicticia) return false
+    if (k === 'ia') return true
     return true
   }
   if (n.type === 'project') {

@@ -6,12 +6,15 @@ import {
   appendMissionMessage,
   createAgent,
   createMission,
+  deleteAgent,
   listAgents,
   patchMission,
   pauseMission,
   rejectSkill,
+  renameAgent,
   resumeMission,
 } from '../services/sentinel.js'
+import { getSentinelBrain } from '../services/appSettings.js'
 
 export const sentinelRouter = Router()
 
@@ -22,7 +25,8 @@ function fail(res: import('express').Response, err: unknown, notFound = 'no enco
     : msg.includes('vací') ||
         msg.includes('Todavía') ||
         msg.includes('en curso') ||
-        msg.includes('pausá')
+        msg.includes('pausá') ||
+        msg.includes('demasiado')
       ? 400
       : 500
   res.status(status).json({ error: msg })
@@ -31,6 +35,14 @@ function fail(res: import('express').Response, err: unknown, notFound = 'no enco
 sentinelRouter.get('/agents', (_req, res) => {
   try {
     res.json({ ok: true, agents: listAgents() })
+  } catch (err) {
+    fail(res, err)
+  }
+})
+
+sentinelRouter.get('/brain', (_req, res) => {
+  try {
+    res.json({ ok: true, brain: getSentinelBrain() })
   } catch (err) {
     fail(res, err)
   }
@@ -53,6 +65,27 @@ sentinelRouter.get('/agents/:id', (req, res) => {
       return
     }
     res.json({ ok: true, ...bundle })
+  } catch (err) {
+    fail(res, err)
+  }
+})
+
+sentinelRouter.patch('/agents/:id', (req, res) => {
+  try {
+    const agent = renameAgent(
+      String(req.params.id),
+      String(req.body?.name ?? ''),
+    )
+    res.json({ ok: true, agent })
+  } catch (err) {
+    fail(res, err)
+  }
+})
+
+sentinelRouter.delete('/agents/:id', (req, res) => {
+  try {
+    deleteAgent(String(req.params.id))
+    res.json({ ok: true })
   } catch (err) {
     fail(res, err)
   }

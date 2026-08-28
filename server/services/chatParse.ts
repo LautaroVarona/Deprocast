@@ -103,9 +103,20 @@ function isMediaText(text: string): boolean {
   )
 }
 
+function decodeFilename(filename: string): string {
+  if (!/[À-ÿ]|ð/.test(filename)) return filename
+  try {
+    const next = Buffer.from(filename, 'latin1').toString('utf8')
+    if (next.includes('\uFFFD') || next === filename) return filename
+    return next
+  } catch {
+    return filename
+  }
+}
+
 function suggestNameFromFilename(filename?: string | null): string {
   if (!filename) return 'Chat importado'
-  let base = filename.replace(/\.[^.]+$/, '')
+  let base = decodeFilename(filename).replace(/\.[^.]+$/, '')
   base = base
     .replace(/^Chat de WhatsApp con\s+/i, '')
     .replace(/^WhatsApp Chat with\s+/i, '')

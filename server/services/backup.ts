@@ -3,12 +3,24 @@ import fs from 'node:fs'
 import path from 'node:path'
 import {
   backfillCurrentRun,
+  closeDb,
   ensureTrincheraSeed,
   getDb,
+  getDbPath,
   getTrincheraNotebookId,
+  openDbFile,
   rebuildSearchFts,
+  reopenDb,
+  syncPersonAliases,
+  syncProjectAliases,
 } from '../db.js'
-import { pausePipeline } from './pipeline.js'
+import { normalizeName } from './entityMatch.js'
+import { csvEscape } from './csvSafe.js'
+import {
+  RESTORE_DB_PATH,
+  rmSqliteBundle,
+  swapSqliteFile,
+} from './restoreSwap.js'
 
 export const BACKUP_FORMAT = 'deprocast-backup'
 export const BACKUP_VERSION = 3
@@ -176,7 +188,13 @@ export type BackupApplyResult = {
   inserted: BackupTableCounts
   skipped: BackupTableCounts
   remapped: { trinchera: { from: string; to: string } | null }
-  media: { copied: number; skipped: number }
+  media: { copied: number; skipped: number; conflicts: number; failed: number }
+  mediaStatus: 'ok' | 'failed' | 'partial' | 'skipped'
+  dbCommitted: boolean
+  profiles: {
+    persons_merged: number
+    projects_merged: number
+  }
 }
 
 function tableExists(db: DatabaseSync, name: string): boolean {
@@ -186,13 +204,6 @@ function tableExists(db: DatabaseSync, name: string): boolean {
     )
     .get(name) as { ok: number } | undefined
   return Boolean(row)
-}
-
-function tableColumns(db: DatabaseSync, name: string): string[] {
-  const info = db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{
-    name: string
-  }>
-  return info.map((c) => c.name)
 }
 
 function countTable(db: DatabaseSync, name: string): number {
@@ -349,13 +360,6 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('depro_power_notes'),
     },
   }
-}
-
-function csvEscape(value: unknown): string {
-  if (value == null) return ''
-  const s = typeof value === 'string' ? value : JSON.stringify(value)
-  if (/[",\r\n]/.test(s)) return `"${s.replaceAll('"', '""')}"`
-  return s
 }
 
 export function serializeBackupJson(dump: BackupDump): string {
@@ -531,22 +535,63 @@ function insertTableRows(
   if (!tableExists(db, name)) {
     return { inserted: 0, skipped: rows.length }
   }
-  const cols = tableColumns(db, name)
+  const info = db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{
+    name: string
+    notnull: number
+    dflt_value: unknown
+    pk: number
+  }>
+  const cols = info.map((c) => c.name)
   if (rows.length === 0 || cols.length === 0) {
     return { inserted: 0, skipped: 0 }
   }
-  const placeholders = cols.map(() => '?').join(', ')
-  const quoted = cols.map((c) => `"${c}"`).join(', ')
+  const meta = new Map(info.map((c) => [c.name, c]))
   const verb = mode === 'merge' ? 'INSERT OR IGNORE' : 'INSERT'
-  const stmt = db.prepare(
-    `${verb} INTO "${name}" (${quoted}) VALUES (${placeholders})`,
-  )
+  const stmtCache = new Map<
+    string,
+    ReturnType<DatabaseSync['prepare']>
+  >()
   let inserted = 0
   let skipped = 0
   for (const row of rows) {
-    const result = stmt.run(...cols.map((c) => cellValue(row[c])))
-    if (Number(result.changes ?? 0) > 0) inserted++
-    else skipped++
+    const used: string[] = []
+    const values: Array<string | number | bigint | null> = []
+    let missingRequired = false
+    for (const c of cols) {
+      const raw = row[c]
+      if (raw !== undefined && raw !== null) {
+        used.push(c)
+        values.push(cellValue(raw))
+        continue
+      }
+      const col = meta.get(c)
+      if (col && col.notnull && col.dflt_value == null && col.pk === 0) {
+        missingRequired = true
+        break
+      }
+    }
+    if (missingRequired || used.length === 0) {
+      skipped++
+      continue
+    }
+    const key = used.join('\0')
+    let stmt = stmtCache.get(key)
+    if (!stmt) {
+      const placeholders = used.map(() => '?').join(', ')
+      const quoted = used.map((c) => `"${c}"`).join(', ')
+      stmt = db.prepare(
+        `${verb} INTO "${name}" (${quoted}) VALUES (${placeholders})`,
+      )
+      stmtCache.set(key, stmt)
+    }
+    try {
+      const result = stmt.run(...values)
+      if (Number(result.changes ?? 0) > 0) inserted++
+      else skipped++
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      throw new Error(`No se pudo escribir la tabla ${name}: ${msg}`)
+    }
   }
   return { inserted, skipped }
 }
@@ -594,10 +639,518 @@ function prepareMergeRow(
   return next
 }
 
-export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
+function parseAliasList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((a) => String(a).trim()).filter(Boolean)
+  }
+  if (typeof raw !== 'string' || !raw.trim()) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.map((a) => String(a).trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function profileKeys(canonical: string, aliasesRaw: unknown): string[] {
+  const keys = new Set<string>()
+  const add = (s: string) => {
+    const k = normalizeName(s)
+    if (k) keys.add(k)
+  }
+  add(canonical)
+  for (const a of parseAliasList(aliasesRaw)) add(a)
+  return [...keys]
+}
+
+function unionAliases(
+  canonical: string,
+  a: string[],
+  b: string[],
+): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  const canon = normalizeName(canonical)
+  const add = (raw: string) => {
+    const t = raw.trim()
+    if (!t) return
+    const k = normalizeName(t)
+    if (!k || k === canon || seen.has(k)) return
+    seen.add(k)
+    out.push(t)
+  }
+  for (const x of a) add(x)
+  for (const x of b) add(x)
+  return out
+}
+
+function isLiveProfile(row: Record<string, unknown>): boolean {
+  const merged = row.merged_into
+  if (merged != null && String(merged).trim() !== '') return false
+  return String(row.status ?? '') !== 'merged'
+}
+
+function isManualProfile(row: Record<string, unknown>): boolean {
+  return String(row.source ?? '') === 'manual'
+}
+
+type LocalProfile = {
+  id: string
+  canonical: string
+  aliases: string[]
+  source: string
+  notes: string
+  kind: string
+  row: Record<string, unknown>
+}
+
+function loadLocalProfiles(
+  db: DatabaseSync,
+  table: 'persons' | 'projects',
+): { byId: Map<string, LocalProfile>; byKey: Map<string, LocalProfile[]> } {
+  const byId = new Map<string, LocalProfile>()
+  const byKey = new Map<string, LocalProfile[]>()
+  if (!tableExists(db, table)) return { byId, byKey }
+  const rows = db.prepare(`SELECT * FROM "${table}"`).all() as Record<
+    string,
+    unknown
+  >[]
+  for (const row of rows) {
+    if (typeof row.id !== 'string') continue
+    const canonical =
+      table === 'persons' ? String(row.name ?? '') : String(row.title ?? '')
+    const prof: LocalProfile = {
+      id: row.id,
+      canonical,
+      aliases: parseAliasList(row.aliases),
+      source: String(row.source ?? ''),
+      notes: String(row.notes ?? ''),
+      kind: String(row.kind ?? ''),
+      row,
+    }
+    byId.set(prof.id, prof)
+    if (!isLiveProfile(row)) continue
+    for (const k of profileKeys(canonical, row.aliases)) {
+      const list = byKey.get(k) ?? []
+      list.push(prof)
+      byKey.set(k, list)
+    }
+  }
+  return { byId, byKey }
+}
+
+function followMerged(
+  start: LocalProfile,
+  byId: Map<string, LocalProfile>,
+): LocalProfile {
+  const seen = new Set<string>()
+  let cur = start
+  while (true) {
+    if (seen.has(cur.id)) return cur
+    seen.add(cur.id)
+    if (isLiveProfile(cur.row)) return cur
+    const nextId = String(cur.row.merged_into ?? '').trim()
+    if (!nextId) return cur
+    const next = byId.get(nextId)
+    if (!next) return cur
+    cur = next
+  }
+}
+
+function pickLocalMatch(
+  dumpRow: Record<string, unknown>,
+  dumpKeys: string[],
+  local: ReturnType<typeof loadLocalProfiles>,
+): LocalProfile | null {
+  const dumpId = typeof dumpRow.id === 'string' ? dumpRow.id : ''
+  if (dumpId && local.byId.has(dumpId)) {
+    return followMerged(local.byId.get(dumpId) as LocalProfile, local.byId)
+  }
+  const seen = new Map<string, LocalProfile>()
+  for (const k of dumpKeys) {
+    for (const hit of local.byKey.get(k) ?? []) seen.set(hit.id, hit)
+  }
+  if (seen.size === 0) return null
+  const all = [...seen.values()]
+  const manuals = all.filter((p) => p.source === 'manual')
+  if (manuals.length === 1) return manuals[0]
+  if (manuals.length > 1) return null
+  if (all.length === 1) return all[0]
+  return null
+}
+
+function remapValue(
+  value: unknown,
+  map: Map<string, string>,
+): unknown {
+  if (typeof value !== 'string') return value
+  return map.get(value) ?? value
+}
+
+function remapJsonIds(
+  raw: unknown,
+  personMap: Map<string, string>,
+  projectMap: Map<string, string>,
+  mode: 'person-ids' | 'entity-refs' | 'project-ids',
+): unknown {
+  if (raw == null) return raw
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return raw
+    }
+  }
+  if (mode === 'person-ids' && Array.isArray(parsed)) {
+    const next = parsed.map((id) =>
+      typeof id === 'string' ? (personMap.get(id) ?? id) : id,
+    )
+    return JSON.stringify(next)
+  }
+  if (mode === 'project-ids' && Array.isArray(parsed)) {
+    const next = parsed.map((id) =>
+      typeof id === 'string' ? (projectMap.get(id) ?? id) : id,
+    )
+    return JSON.stringify(next)
+  }
+  if (mode === 'entity-refs' && Array.isArray(parsed)) {
+    const next = parsed.map((item) => {
+      if (!item || typeof item !== 'object') return item
+      const o = item as Record<string, unknown>
+      const type = String(o.type ?? '')
+      const id = typeof o.id === 'string' ? o.id : ''
+      if (type === 'person' && personMap.has(id)) {
+        return { ...o, id: personMap.get(id) }
+      }
+      if (type === 'project' && projectMap.has(id)) {
+        return { ...o, id: projectMap.get(id) }
+      }
+      return o
+    })
+    return JSON.stringify(next)
+  }
+  return raw
+}
+
+function remapSpeakerMapJson(
+  raw: unknown,
+  personMap: Map<string, string>,
+): unknown {
+  if (raw == null || personMap.size === 0) return raw
+  let parsed: unknown = raw
+  if (typeof raw === 'string') {
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return raw
+    }
+  }
+  if (!Array.isArray(parsed)) return raw
+  const next = parsed.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    const o = item as Record<string, unknown>
+    const pid = typeof o.person_id === 'string' ? o.person_id : ''
+    if (pid && personMap.has(pid)) {
+      return { ...o, person_id: personMap.get(pid) }
+    }
+    return o
+  })
+  return JSON.stringify(next)
+}
+
+function applyIdMapsToDump(
+  dump: BackupDump,
+  personMap: Map<string, string>,
+  projectMap: Map<string, string>,
+): void {
+  if (personMap.size === 0 && projectMap.size === 0) return
+  for (const name of BACKUP_TABLES) {
+    const rows = dump.tables[name] ?? []
+    for (const row of rows) {
+      if (name === 'persons' && typeof row.id === 'string' && personMap.has(row.id)) {
+        row.id = personMap.get(row.id)
+      }
+      if (name === 'projects' && typeof row.id === 'string' && projectMap.has(row.id)) {
+        row.id = projectMap.get(row.id)
+      }
+      if (personMap.size > 0) {
+        if ('person_id' in row) row.person_id = remapValue(row.person_id, personMap)
+        if ('from_person_id' in row) {
+          row.from_person_id = remapValue(row.from_person_id, personMap)
+        }
+        if ('to_person_id' in row) {
+          row.to_person_id = remapValue(row.to_person_id, personMap)
+        }
+        if ('merged_into' in row && name === 'persons') {
+          row.merged_into = remapValue(row.merged_into, personMap)
+        }
+        if (
+          name === 'entity_links' &&
+          String(row.entity_kind ?? '') === 'person'
+        ) {
+          row.entity_id = remapValue(row.entity_id, personMap)
+        }
+        if (name === 'entity_proposals') {
+          if (String(row.kind ?? '') === 'person') {
+            row.matched_entity_id = remapValue(row.matched_entity_id, personMap)
+          }
+        }
+        if (
+          name === 'embeddings' &&
+          String(row.object_type ?? '') === 'person'
+        ) {
+          row.object_id = remapValue(row.object_id, personMap)
+        }
+        if (name === 'sandbox_nodes' && String(row.kind ?? '') === 'person') {
+          row.ref_id = remapValue(row.ref_id, personMap)
+        }
+        if (name === 'ama_links') {
+          if (String(row.object_type ?? '') === 'person') {
+            row.object_id = remapValue(row.object_id, personMap)
+          }
+          if (String(row.target_kind ?? '') === 'person') {
+            row.target_id = remapValue(row.target_id, personMap)
+          }
+        }
+        if (name === 'map_tags' && String(row.target_kind ?? '') === 'person') {
+          row.target_id = remapValue(row.target_id, personMap)
+        }
+        if (
+          name === 'dashboard_pins' &&
+          String(row.ref_type ?? '') === 'person'
+        ) {
+          row.ref_id = remapValue(row.ref_id, personMap)
+        }
+        if (name === 'chat_sessions') {
+          row.linked_person_ids_json = remapJsonIds(
+            row.linked_person_ids_json,
+            personMap,
+            projectMap,
+            'person-ids',
+          )
+          row.speaker_map_json = remapSpeakerMapJson(
+            row.speaker_map_json,
+            personMap,
+          )
+          if ('primary_person_id' in row) {
+            row.primary_person_id = remapValue(
+              row.primary_person_id,
+              personMap,
+            )
+          }
+        }
+        if (name === 'chat_blocks') {
+          row.linked_person_ids_json = remapJsonIds(
+            row.linked_person_ids_json,
+            personMap,
+            projectMap,
+            'person-ids',
+          )
+        }
+      }
+      if (projectMap.size > 0) {
+        if ('project_id' in row) row.project_id = remapValue(row.project_id, projectMap)
+        if ('merged_into' in row && name === 'projects') {
+          row.merged_into = remapValue(row.merged_into, projectMap)
+        }
+        if (name === 'entity_proposals') {
+          const kind = String(row.kind ?? '')
+          if (kind === 'project') {
+            row.matched_entity_id = remapValue(row.matched_entity_id, projectMap)
+          }
+        }
+        if (
+          name === 'entity_links' &&
+          String(row.entity_kind ?? '') === 'project'
+        ) {
+          row.entity_id = remapValue(row.entity_id, projectMap)
+        }
+        if (
+          name === 'embeddings' &&
+          String(row.object_type ?? '') === 'project'
+        ) {
+          row.object_id = remapValue(row.object_id, projectMap)
+        }
+        if (name === 'sandbox_nodes' && String(row.kind ?? '') === 'project') {
+          row.ref_id = remapValue(row.ref_id, projectMap)
+        }
+        if (name === 'ama_links') {
+          if (String(row.object_type ?? '') === 'project') {
+            row.object_id = remapValue(row.object_id, projectMap)
+          }
+          if (String(row.target_kind ?? '') === 'project') {
+            row.target_id = remapValue(row.target_id, projectMap)
+          }
+        }
+        if (name === 'map_tags' && String(row.target_kind ?? '') === 'project') {
+          row.target_id = remapValue(row.target_id, projectMap)
+        }
+        if (
+          name === 'dashboard_pins' &&
+          String(row.ref_type ?? '') === 'project'
+        ) {
+          row.ref_id = remapValue(row.ref_id, projectMap)
+        }
+        if (name === 'chat_sessions') {
+          if ('primary_project_id' in row) {
+            row.primary_project_id = remapValue(
+              row.primary_project_id,
+              projectMap,
+            )
+          }
+          row.linked_project_ids_json = remapJsonIds(
+            row.linked_project_ids_json,
+            personMap,
+            projectMap,
+            'project-ids',
+          )
+        }
+        if (name === 'chat_blocks') {
+          row.linked_project_ids_json = remapJsonIds(
+            row.linked_project_ids_json,
+            personMap,
+            projectMap,
+            'project-ids',
+          )
+        }
+      }
+      if (name === 'chat_blocks' && row.linked_entities_json) {
+        try {
+          const parsed = JSON.parse(String(row.linked_entities_json)) as unknown
+          if (Array.isArray(parsed)) {
+            row.linked_entities_json = JSON.stringify(
+              parsed.map((item) => {
+                if (!item || typeof item !== 'object') return item
+                const o = { ...(item as Record<string, unknown>) }
+                const kind = String(o.kind ?? '')
+                const idKey = o.id != null ? 'id' : 'entity_id'
+                const id = String(o[idKey] ?? '')
+                if (kind === 'person' && personMap.size > 0) {
+                  o[idKey] = remapValue(id, personMap)
+                } else if (kind === 'project' && projectMap.size > 0) {
+                  o[idKey] = remapValue(id, projectMap)
+                }
+                return o
+              }),
+            )
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (name === 'dialogo_threads') {
+        row.entity_refs = remapJsonIds(
+          row.entity_refs,
+          personMap,
+          projectMap,
+          'entity-refs',
+        )
+      }
+    }
+  }
+}
+
+function foldIncomingProfile(
+  db: DatabaseSync,
+  table: 'persons' | 'projects',
+  local: LocalProfile,
+  dumpRow: Record<string, unknown>,
+): void {
+  const dumpCanonical =
+    table === 'persons'
+      ? String(dumpRow.name ?? '')
+      : String(dumpRow.title ?? '')
+  const aliases = unionAliases(local.canonical, local.aliases, [
+    dumpCanonical,
+    ...parseAliasList(dumpRow.aliases),
+  ])
+  const aliasesJson = JSON.stringify(aliases)
+  const now = new Date().toISOString()
+  const dumpNotes = String(dumpRow.notes ?? '').trim()
+  const notes = local.notes.trim() || dumpNotes || null
+  const promote =
+    local.source !== 'manual' && isManualProfile(dumpRow)
+  if (table === 'persons') {
+    const name = promote ? dumpCanonical || local.canonical : local.canonical
+    const kind = promote
+      ? String(dumpRow.kind ?? local.kind)
+      : String(local.row.kind ?? local.kind)
+    const source = promote ? 'manual' : local.source
+    db.prepare(
+      `UPDATE persons SET aliases = ?, notes = ?, name = ?, kind = ?, source = ?, updated_at = ? WHERE id = ?`,
+    ).run(aliasesJson, notes, name, kind, source, now, local.id)
+    syncPersonAliases(local.id, name, aliasesJson)
+    local.aliases = aliases
+    local.canonical = name
+    local.source = source
+    local.notes = notes ?? ''
+  } else {
+    const title = promote ? dumpCanonical || local.canonical : local.canonical
+    const source = promote ? 'manual' : local.source
+    db.prepare(
+      `UPDATE projects SET aliases = ?, notes = ?, title = ?, source = ?, updated_at = ? WHERE id = ?`,
+    ).run(aliasesJson, notes, title, source, now, local.id)
+    syncProjectAliases(local.id, title, aliasesJson)
+    local.aliases = aliases
+    local.canonical = title
+    local.source = source
+    local.notes = notes ?? ''
+  }
+}
+
+function mergeIncomingProfiles(
+  db: DatabaseSync,
+  dump: BackupDump,
+  table: 'persons' | 'projects',
+): { remap: Map<string, string>; merged: number } {
+  const remap = new Map<string, string>()
+  const local = loadLocalProfiles(db, table)
+  const incoming = dump.tables[table] ?? []
+  let merged = 0
+  for (const row of incoming) {
+    if (typeof row.id !== 'string' || !isLiveProfile(row)) continue
+    const canonical =
+      table === 'persons' ? String(row.name ?? '') : String(row.title ?? '')
+    const keys = profileKeys(canonical, row.aliases)
+    const match = pickLocalMatch(row, keys, local)
+    if (!match) continue
+    foldIncomingProfile(db, table, match, row)
+    for (const k of profileKeys(match.canonical, match.aliases)) {
+      const list = local.byKey.get(k) ?? []
+      if (!list.some((p) => p.id === match.id)) {
+        list.push(match)
+        local.byKey.set(k, list)
+      }
+    }
+    if (row.id !== match.id) {
+      remap.set(row.id, match.id)
+      merged++
+    }
+  }
+  return { remap, merged }
+}
+
+function filterMergeRows(
+  db: DatabaseSync,
+  name: BackupTableName,
+  rows: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  if (name !== 'geografia_geom' || !tableExists(db, 'geografia')) return rows
+  const has = db.prepare(`SELECT 1 AS ok FROM geografia WHERE id = ?`)
+  return rows.filter((row) => {
+    const id = String(row.geografia_id ?? '')
+    if (!id) return false
+    return Boolean(has.get(id))
+  })
+}
+
+export function restoreBackupFromJsonInto(
+  raw: unknown,
+  db: DatabaseSync,
+): BackupApplyResult {
   const dump = parseDump(raw)
-  const db = getDb()
-  pausePipeline()
 
   const deleteOrder = [...BACKUP_TABLES].reverse()
   const inserted = emptyCounts()
@@ -623,9 +1176,8 @@ export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
     }
 
     rebuildSearchFts(db)
-    db.exec('COMMIT')
-    ensureTrincheraSeed()
     backfillCurrentRun(db)
+    db.exec('COMMIT')
     return {
       ok: true,
       mode: 'replace',
@@ -633,7 +1185,10 @@ export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
       inserted,
       skipped,
       remapped: { trinchera: null },
-      media: { copied: 0, skipped: 0 },
+      media: { copied: 0, skipped: 0, conflicts: 0, failed: 0 },
+      mediaStatus: 'skipped',
+      dbCommitted: false,
+      profiles: { persons_merged: 0, projects_merged: 0 },
     }
   } catch (err) {
     try {
@@ -645,23 +1200,89 @@ export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
   }
 }
 
-/** Inserta filas que no existen. No borra el universo destino. */
+export function restoreBackupFromJson(raw: unknown): BackupApplyResult {
+  const result = restoreBackupFromJsonInto(raw, getDb())
+  ensureTrincheraSeed()
+  result.dbCommitted = true
+  return result
+}
+
+/** Escribe el dump en data/deprocast.restore.db. No toca la DB viva. */
+export function restoreBackupToStagingFile(raw: unknown): BackupApplyResult {
+  rmSqliteBundle(RESTORE_DB_PATH)
+  const staging = openDbFile(RESTORE_DB_PATH, { seed: false })
+  try {
+    const result = restoreBackupFromJsonInto(raw, staging)
+    const violations = staging.prepare('PRAGMA foreign_key_check').all() as Array<
+      Record<string, unknown>
+    >
+    if (violations.length > 0) {
+      throw new Error(
+        `Restore rechazado: ${violations.length} violación(es) de foreign_key_check`,
+      )
+    }
+    try {
+      staging.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+    } catch {
+      /* ignore */
+    }
+    staging.close()
+    return result
+  } catch (err) {
+    try {
+      staging.close()
+    } catch {
+      /* ignore */
+    }
+    rmSqliteBundle(RESTORE_DB_PATH)
+    throw err
+  }
+}
+
+/** Cierra la DB viva, swap del archivo staging, reabre. */
+export function commitStagedRestore(): void {
+  closeDb()
+  try {
+    swapSqliteFile(RESTORE_DB_PATH, getDbPath())
+  } catch (err) {
+    try {
+      reopenDb()
+    } catch {
+      /* ignore */
+    }
+    throw err
+  }
+  reopenDb()
+  ensureTrincheraSeed()
+  backfillCurrentRun()
+}
+
+/** Inserta filas que no existen. Fusiona perfiles homólogos por nombre/alias. */
 export function mergeBackupFromJson(raw: unknown): BackupApplyResult {
   const dump = parseDump(raw)
   const db = getDb()
-  pausePipeline()
   ensureTrincheraSeed()
   const localTrinchera = getTrincheraNotebookId()
   const trinchera = remapTrinchera(dump, localTrinchera)
 
   const inserted = emptyCounts()
   const skipped = emptyCounts()
+  let personsMerged = 0
+  let projectsMerged = 0
 
   db.exec('BEGIN')
   try {
+    const persons = mergeIncomingProfiles(db, dump, 'persons')
+    const projects = mergeIncomingProfiles(db, dump, 'projects')
+    personsMerged = persons.merged
+    projectsMerged = projects.merged
+    applyIdMapsToDump(dump, persons.remap, projects.remap)
+
     for (const name of BACKUP_TABLES) {
-      const prepared = (dump.tables[name] ?? []).map((row) =>
-        prepareMergeRow(name, row),
+      const prepared = filterMergeRows(
+        db,
+        name,
+        (dump.tables[name] ?? []).map((row) => prepareMergeRow(name, row)),
       )
       const result = insertTableRows(db, name, prepared, 'merge')
       inserted[name] = result.inserted
@@ -679,7 +1300,13 @@ export function mergeBackupFromJson(raw: unknown): BackupApplyResult {
       inserted,
       skipped,
       remapped: { trinchera },
-      media: { copied: 0, skipped: 0 },
+      media: { copied: 0, skipped: 0, conflicts: 0, failed: 0 },
+      mediaStatus: 'skipped',
+      dbCommitted: true,
+      profiles: {
+        persons_merged: personsMerged,
+        projects_merged: projectsMerged,
+      },
     }
   } catch (err) {
     try {
@@ -694,7 +1321,6 @@ export function mergeBackupFromJson(raw: unknown): BackupApplyResult {
 /** Borra la actividad del usuario. Conserva AmazonA, listas de agentes, el mapa y el núcleo Deprocast. */
 export function wipeUserActivity(): void {
   const db = getDb()
-  pausePipeline()
 
   const deleteOrder = [...USER_ACTIVITY_TABLES].reverse()
 

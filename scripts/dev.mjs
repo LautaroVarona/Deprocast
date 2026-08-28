@@ -39,7 +39,9 @@ function findPortableNode() {
     )
   }
   if (isWin) {
-    candidates.push('C:\\Users\\Lautaro.Sarni\\bin\\node-v24.18.0-win-x64\\node.exe')
+    candidates.push(
+      path.join(home, 'bin', 'node-v24.18.0-win-x64', 'node.exe'),
+    )
   }
   try {
     const binDir = path.join(home, 'bin')
@@ -69,7 +71,7 @@ function printNeedNode24() {
   console.error('[dev] Sin la API en :3001, Vite responde HTTP 500 / ECONNREFUSED en /api/*.')
   if (isWin) {
     console.error(
-      '[dev] Poné Node 24 en el PATH, p.ej. set PATH=C:\\Users\\Lautaro.Sarni\\bin\\node-v24.18.0-win-x64;%PATH%',
+      '[dev] Poné Node 24 en el PATH, p.ej. set PATH=%USERPROFILE%\\bin\\node-v24.18.0-win-x64;%PATH%',
     )
   } else {
     console.error(
@@ -118,26 +120,42 @@ if (!hasNodeSqlite()) {
     path.join(root, 'node_modules', '.bin', isWin ? `${name}.cmd` : name)
 
   const children = []
+  let shuttingDown = false
 
-  function run(label, cmd, args) {
-    const child = spawn(cmd, args, {
-      cwd: root,
-      stdio: 'inherit',
-      shell: isWin,
-      env: process.env,
-    })
-    child.on('exit', (code, signal) => {
-      if (signal) return
-      if (code && code !== 0) {
-        console.error(`[dev] ${label} salió con código ${code}`)
-        shutdown(code)
-      }
-    })
+  function run(label, cmd, args, { restartOnFail = false } = {}) {
+    const spawnChild = () => {
+      const child = spawn(cmd, args, {
+        cwd: root,
+        stdio: 'inherit',
+        shell: isWin,
+        env: process.env,
+      })
+      child.on('exit', (code, signal) => {
+        const idx = children.indexOf(child)
+        if (idx >= 0) children.splice(idx, 1)
+        if (shuttingDown || signal) return
+        if (code && code !== 0) {
+          console.error(`[dev] ${label} salió con código ${code}`)
+          if (restartOnFail) {
+            console.error(`[dev] reiniciando ${label} en 1s…`)
+            setTimeout(() => {
+              if (shuttingDown) return
+              children.push(spawnChild())
+            }, 1000)
+            return
+          }
+          shutdown(code)
+        }
+      })
+      return child
+    }
+    const child = spawnChild()
     children.push(child)
     return child
   }
 
   function shutdown(code = 0) {
+    shuttingDown = true
     for (const child of children) {
       try {
         child.kill('SIGTERM')
@@ -166,7 +184,7 @@ if (!hasNodeSqlite()) {
   }
 
   console.log(`[dev] Node ${process.version}  |  API → http://127.0.0.1:3001  |  UI → http://localhost:5173`)
-  run('server', bin('tsx'), ['watch', 'server/index.ts'])
+  run('server', bin('tsx'), ['watch', 'server/index.ts'], { restartOnFail: true })
   const ready = await waitForHealth(3001)
   if (!ready) {
     console.warn('[dev] API no respondió a /api/health; Vite arranca igual')

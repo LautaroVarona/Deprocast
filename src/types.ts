@@ -146,6 +146,16 @@ export type SpeakerAssignment = {
   person_name: string | null
 }
 
+/** WhatsApp remitente → perfil Deprocast (hablador). */
+export type ChatSpeakerMap = {
+  remitente: string
+  person_id: string | null
+  person_name: string | null
+  is_ai?: boolean
+  role?: 'human' | 'assistant'
+  model?: string | null
+}
+
 export type DiarizationUtterance = {
   speaker: number
   start: number
@@ -258,7 +268,7 @@ export interface Bookmark {
 }
 
 export interface BookmarkManualTag {
-  kind: 'person' | 'project' | 'dominio'
+  kind: 'person' | 'project' | 'dominio' | 'agrupacion' | 'geografia'
   entity_id: string
   entity_name: string
 }
@@ -391,6 +401,7 @@ export type PersonKind =
   | 'fisica'
   | 'juridica'
   | 'ficticia'
+  | 'ia'
   | 'abstracta'
   | 'ruido'
   | 'geografia'
@@ -794,6 +805,11 @@ export interface ChatSession {
   tipo: ChatTipo
   participantes_json: string
   linked_person_ids_json: string
+  linked_project_ids_json?: string
+  speaker_map_json?: string
+  primary_person_id?: string | null
+  primary_project_id?: string | null
+  human_weight?: number | null
   vault_path: string | null
   status: ChatSessionStatus
   created_at: string
@@ -828,6 +844,14 @@ export interface ChatBlock {
   entry_id: string | null
   quantomo_id: string | null
   summary_json: string
+  linked_person_ids_json?: string
+  linked_project_ids_json?: string
+  linked_entities_json?: string
+  human_weight?: number | null
+  notes?: string | null
+  links_json?: string
+  entities_reviewed?: number
+  preview_messages?: ChatMessage[]
 }
 
 export interface LinkHarvest {
@@ -855,6 +879,21 @@ export interface ChatPreview {
   first_ts: string | null
   last_ts: string | null
   origin_hash: string
+}
+
+export interface ChatBlockEntityView {
+  name: string
+  type: 'person' | 'project' | string
+  kind?: string
+  category?: string
+  status?: string
+  assigned_id?: string | null
+  assigned_name?: string | null
+  proposal_id?: string | null
+  proposal_type?: string | null
+  suggested_match_id?: string | null
+  suggested_match_name?: string | null
+  discarded?: boolean
 }
 
 export type CalendarPole = 'ingested' | 'native'
@@ -1434,6 +1473,7 @@ export type SentinelSkillStatus = 'draft' | 'accepted' | 'rejected'
 export interface SentinelAgent {
   id: string
   code: string
+  name: string
   status: SentinelStatus
   profile_md: string
   created_at: string

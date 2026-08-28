@@ -146,6 +146,7 @@ export function PageValidationPanel({
   const [msg, setMsg] = useState<string | null>(null)
   const [editingImage, setEditingImage] = useState(false)
   const [imgTick, setImgTick] = useState(0)
+  const [imageBroken, setImageBroken] = useState(false)
   const [pane, setPane] = useState<Pane>('transcripcion')
 
   const [mentionOpen, setMentionOpen] = useState(false)
@@ -453,6 +454,14 @@ export function PageValidationPanel({
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (
+        hit.kind !== 'person' &&
+        hit.kind !== 'project' &&
+        hit.kind !== 'agrupacion' &&
+        hit.kind !== 'dominio'
+      ) {
+        return
+      }
       const before = entityNote.slice(0, mentionRange.start)
       const after = entityNote.slice(mentionRange.end)
       const insert = multi ? `@${hit.entity_name} @` : `@${hit.entity_name} `
@@ -578,6 +587,10 @@ export function PageValidationPanel({
   }
 
   const imageUrl = `${api.notebookPageImageUrl(notebook.id, slot)}?v=${imgTick}`
+
+  useEffect(() => {
+    setImageBroken(false)
+  }, [slot, imgTick, page?.image_path])
 
   return (
     <section className="nb-section nb-validate is-fit">
@@ -713,8 +726,16 @@ export function PageValidationPanel({
                 }
               }}
             />
-          ) : page.image_path ? (
-            <img src={imageUrl} alt={label} />
+          ) : page.image_path && !imageBroken ? (
+            <img
+              src={imageUrl}
+              alt={label}
+              onError={() => setImageBroken(true)}
+            />
+          ) : page.image_path && imageBroken ? (
+            <div className="nb-face-empty">
+              Media ausente — reponer desde fuentes
+            </div>
           ) : (
             <div className="nb-face-empty">Sin imagen</div>
           )}

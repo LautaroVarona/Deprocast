@@ -2,22 +2,35 @@ import { useState } from 'react'
 import { api } from '../services/api'
 import type { AppRun } from '../types'
 
+const OPERATOR_NAME_KEY = 'deprocast.operator.name'
+
 interface Props {
   onStarted: (run: AppRun) => void
 }
 
 export function NewUserGate({ onStarted }: Props) {
-  const [name, setName] = useState('')
+  const [name, setName] = useState(() => {
+    try {
+      return localStorage.getItem(OPERATOR_NAME_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function handleStart() {
-    const trimmed = name.trim()
+  async function handleStart(raw?: string) {
+    const trimmed = (raw ?? name).trim()
     if (!trimmed || busy) return
     setBusy(true)
     setError(null)
     try {
       const data = await api.startRun(trimmed)
+      try {
+        localStorage.setItem(OPERATOR_NAME_KEY, trimmed)
+      } catch {
+        /* ignore */
+      }
       onStarted(data.run)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo empezar')

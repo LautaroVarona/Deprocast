@@ -1,10 +1,12 @@
 import { SERVER_ORIGIN, type CofreState, type SwToPopup } from './protocol'
+import { getExtensionToken, setExtensionToken } from './auth'
 
 const healthEl = document.getElementById('health') as HTMLParagraphElement
 const statusEl = document.getElementById('status') as HTMLParagraphElement
 const errorEl = document.getElementById('error') as HTMLParagraphElement
 const markEl = document.getElementById('mark') as HTMLSpanElement
 const micEl = document.getElementById('mic') as HTMLInputElement
+const tokenEl = document.getElementById('token') as HTMLInputElement
 const btnDesktop = document.getElementById('btn-desktop') as HTMLButtonElement
 const btnTab = document.getElementById('btn-tab') as HTMLButtonElement
 const btnStop = document.getElementById('btn-stop') as HTMLButtonElement
@@ -91,8 +93,11 @@ async function pingHealth(): Promise<void> {
   try {
     const res = await fetch(`${SERVER_ORIGIN}/api/health`)
     healthOk = res.ok
+    const token = await getExtensionToken()
     healthEl.textContent = healthOk
-      ? 'Deprocast local en línea'
+      ? token
+        ? 'Deprocast local en línea'
+        : 'Servidor OK · falta token local'
       : 'Servidor local no responde'
     healthEl.className = healthOk ? 'health up' : 'health down'
   } catch {
@@ -185,6 +190,11 @@ btnRetry.addEventListener('click', () => {
 })
 
 void (async () => {
+  const stored = await getExtensionToken()
+  if (stored) tokenEl.value = stored
+  tokenEl.addEventListener('change', () => {
+    void setExtensionToken(tokenEl.value)
+  })
   await pingHealth()
   try {
     await refreshState()

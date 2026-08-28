@@ -249,7 +249,7 @@ export const AGENT_CATALOG: DeproAgent[] = [
     idaStage: 'aplicacion',
     status: 'vivo',
     promptStub: 'chatWithTools',
-    notes: 'Vista Sentinela. Ver server/prompts/alma-sentinela.md.',
+    notes: 'Motor de inferencia configurable (Groq / Ollama / Stealth / Cohere). Ver Config → Motor de Inferencia.',
   },
   {
     id: 'tejedor',

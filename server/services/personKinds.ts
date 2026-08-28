@@ -4,13 +4,14 @@ export const PERSON_KINDS = [
   'fisica',
   'juridica',
   'ficticia',
+  'ia',
   'abstracta',
   'ruido',
   'geografia',
 ] as const
 
 /** Solo estos pueden vivir en el roster de perfiles creados. */
-export const PROFILE_KINDS = ['fisica', 'juridica', 'ficticia'] as const
+export const PROFILE_KINDS = ['fisica', 'juridica', 'ficticia', 'ia'] as const
 
 /**
  * Pueden vivir en la sala de espera como filas de `persons`.
@@ -35,6 +36,16 @@ export function normalizePersonKind(raw: unknown): PersonKind {
     .trim()
 
   if (k === 'agrupacion' || k === 'ficticio') return 'ficticia'
+  if (
+    k === 'ai' ||
+    k === 'ia' ||
+    k === 'bot' ||
+    k === 'assistant' ||
+    k === 'llm' ||
+    k.includes('inteligencia')
+  ) {
+    return 'ia'
+  }
   if ((PERSON_KINDS as readonly string[]).includes(k)) {
     return k as PersonKind
   }

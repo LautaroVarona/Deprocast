@@ -31,9 +31,11 @@ import type {
   MapSystem,
   MapTag,
   ChatBlock,
+  ChatBlockEntityView,
   ChatMessage,
   ChatPreview,
   ChatSession,
+  ChatSpeakerMap,
   ChatTipo,
   Entry,
   AudioAnalysisPayload,
@@ -88,6 +90,7 @@ import type {
   SentinelEvent,
   SentinelSkill,
 } from '../types'
+import { request } from './http'
 
 export type BackupApplyResult = {
   ok: true
@@ -96,32 +99,44 @@ export type BackupApplyResult = {
   inserted: Record<string, number>
   skipped: Record<string, number>
   remapped: { trinchera: { from: string; to: string } | null }
-  media: { copied: number; skipped: number }
+  media: {
+    copied: number
+    skipped: number
+    conflicts?: number
+    failed?: number
+  }
+  mediaStatus?: 'ok' | 'failed' | 'partial' | 'skipped'
+  dbCommitted?: boolean
+  profiles?: {
+    persons_merged: number
+    projects_merged: number
+  }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...(init?.body instanceof FormData
-        ? {}
-        : { 'Content-Type': 'application/json' }),
-      ...init?.headers,
-    },
-  })
+export type ProviderSlot =
+  | 'llm_main'
+  | 'llm_fast'
+  | 'llm_vision'
+  | 'llm_sentinel'
+  | 'embed'
+  | 'rerank'
+  | 'stt'
+  | 'research'
 
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`
-    try {
-      const err = (await res.json()) as { error?: string }
-      if (err.error) message = err.error
-    } catch {
-      /* ignore */
-    }
-    throw new Error(message)
-  }
-
-  return (await res.json()) as T
+export type ProviderConfigResponse = {
+  ok: boolean
+  catalog: Array<{
+    slot: ProviderSlot
+    label: string
+    providers: Array<{
+      id: string
+      label: string
+      models: Array<{ id: string; label: string }>
+    }>
+  }>
+  provider: Record<ProviderSlot, string>
+  model: Record<ProviderSlot, string>
+  keysPresent: Record<string, boolean>
 }
 
 export const api = {
@@ -1526,7 +1541,9 @@ export const api = {
         validadas?: number
         procesadas: number
         with_image: number
+        media_missing_count?: number
       }
+      media_missing_count?: number
       vision_queue: NotebookQueueStatus
     }>(`/api/notebooks/${id}`),
 
@@ -1584,6 +1601,28 @@ export const api = {
       warning?: string
     }>(`/api/notebooks/${id}/ingest-images`, { method: 'POST', body: form })
   },
+
+  repairNotebookMedia: (id: string, files: File[]) => {
+    const form = new FormData()
+    for (const f of files) form.append('files', f)
+    return request<{
+      ok: boolean
+      repaired?: boolean
+      media_missing_count?: number
+      pages_imported?: number
+      slots_assigned?: number[]
+      warning?: string
+    }>(`/api/notebooks/${id}/repair-media`, { method: 'POST', body: form })
+  },
+
+  convertNotebookL72: (id: string) =>
+    request<{
+      ok: boolean
+      notebook_id: string
+      sealed: number
+      replaced: number
+      quantomo_ids: string[]
+    }>(`/api/notebooks/${id}/convert-l72`, { method: 'POST' }),
 
   uploadNotebookSources: (id: string, files: File[], note?: string) => {
     const form = new FormData()
@@ -1844,6 +1883,10 @@ export const api = {
     nombre_chat?: string
     tipo?: ChatTipo
     person_ids?: string[]
+    project_ids?: string[]
+    speaker_map?: ChatSpeakerMap[]
+    primary_person_id?: string | null
+    primary_project_id?: string | null
   }) => {
     const form = new FormData()
     form.append('file', input.file)
@@ -1851,6 +1894,18 @@ export const api = {
     if (input.tipo) form.append('tipo', input.tipo)
     if (input.person_ids?.length) {
       form.append('person_ids', JSON.stringify(input.person_ids))
+    }
+    if (input.project_ids?.length) {
+      form.append('project_ids', JSON.stringify(input.project_ids))
+    }
+    if (input.speaker_map?.length) {
+      form.append('speaker_map', JSON.stringify(input.speaker_map))
+    }
+    if (input.primary_person_id) {
+      form.append('primary_person_id', input.primary_person_id)
+    }
+    if (input.primary_project_id) {
+      form.append('primary_project_id', input.primary_project_id)
     }
     return request<{
       ok: boolean
@@ -1864,10 +1919,19 @@ export const api = {
   listChats: () =>
     request<{ ok: boolean; sessions: ChatSession[] }>('/api/chats'),
 
+  deleteChat: (id: string) =>
+    request<{
+      ok: boolean
+      id: string
+      deleted_blocks: number
+      deleted_entries: number
+    }>(`/api/chats/${id}`, { method: 'DELETE' }),
+
   getChat: (id: string) =>
     request<{
       ok: boolean
       session: ChatSession
+      speakers: ChatSpeakerMap[]
       blocks: ChatBlock[]
       messages_sample: ChatMessage[]
       stats: {
@@ -1879,7 +1943,25 @@ export const api = {
       }
     }>(`/api/chats/${id}`),
 
-  processChat: (id: string, limit = 2) =>
+  patchChat: (
+    id: string,
+    body: {
+      nombre_chat?: string
+      tipo?: ChatTipo
+      speaker_map?: ChatSpeakerMap[]
+      person_ids?: string[]
+      project_ids?: string[]
+      primary_person_id?: string | null
+      primary_project_id?: string | null
+      human_weight?: number | null
+    },
+  ) =>
+    request<{ ok: boolean; session: ChatSession }>(`/api/chats/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  processChat: (id: string, limit = 1, blockId?: string) =>
     request<{
       ok: boolean
       processed: number
@@ -1894,8 +1976,65 @@ export const api = {
       }>
     }>(`/api/chats/${id}/process`, {
       method: 'POST',
-      body: JSON.stringify({ limit }),
+      body: JSON.stringify({ limit, block_id: blockId }),
     }),
+
+  getChatBlock: (id: string, blockId: string) =>
+    request<{
+      ok: boolean
+      session: ChatSession
+      block: ChatBlock
+      messages: ChatMessage[]
+      speakers: ChatSpeakerMap[]
+      entities: ChatBlockEntityView[]
+    }>(`/api/chats/${id}/blocks/${blockId}`),
+
+  patchChatBlock: (
+    id: string,
+    blockId: string,
+    body: {
+      person_ids?: string[]
+      project_ids?: string[]
+      entities?: Array<{ kind: string; id: string; name: string }>
+      human_weight?: number | null
+      notes?: string
+      links?: string[]
+    },
+  ) =>
+    request<{ ok: boolean; block: ChatBlock }>(
+      `/api/chats/${id}/blocks/${blockId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  processChatBlock: (id: string, blockId: string) =>
+    request<{
+      ok: boolean
+      processed: number
+      remaining: number
+      errors: Array<{ block_id: string; error: string }>
+      items: Array<{
+        block_id: string
+        entry_id: string
+        quantomo_id: string
+        title: string
+      }>
+    }>(`/api/chats/${id}/blocks/${blockId}/process`, { method: 'POST' }),
+
+  assignChatEntity: (
+    id: string,
+    blockId: string,
+    body: {
+      name: string
+      type: 'person' | 'project'
+      action: 'link' | 'create' | 'reject'
+      entity_id?: string
+      create_name?: string
+    },
+  ) =>
+    request<{ ok: boolean; entity: ChatBlockEntityView }>(
+      `/api/chats/${id}/blocks/${blockId}/entities`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   listLinks: (opts?: {
     q?: string
@@ -1977,6 +2116,20 @@ export const api = {
         resto: number
       }
     }>('/api/backup/summary'),
+
+  getProviderConfig: () =>
+    request<ProviderConfigResponse>('/api/config/providers'),
+
+  getLocalToken: () => request<{ ok: boolean; token: string }>('/api/config/local-token'),
+
+  putProviderConfig: (body: {
+    provider?: Partial<ProviderConfigResponse['provider']>
+    model?: Partial<ProviderConfigResponse['model']>
+  }) =>
+    request<ProviderConfigResponse>('/api/config/providers', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   sendFeedback: (opts: {
     body: string
@@ -2755,6 +2908,7 @@ export const api = {
       skills: SentinelSkill[]
       events: SentinelEvent[]
       messages: SentinelMessage[]
+      brain?: { provider: string; model: string; label: string }
     }>(`/api/sentinela/agents/${id}`),
 
   abortSentinelInspect: (id: string) =>
@@ -2762,6 +2916,17 @@ export const api = {
       `/api/sentinela/agents/${id}/abort`,
       { method: 'POST', body: '{}' },
     ),
+
+  renameSentinelAgent: (id: string, name: string) =>
+    request<{ ok: boolean; agent: SentinelAgent }>(
+      `/api/sentinela/agents/${id}`,
+      { method: 'PATCH', body: JSON.stringify({ name }) },
+    ),
+
+  deleteSentinelAgent: (id: string) =>
+    request<{ ok: boolean }>(`/api/sentinela/agents/${id}`, {
+      method: 'DELETE',
+    }),
 
   createSentinelMission: (
     agentId: string,

@@ -288,15 +288,20 @@ export async function transcribeAudio(
     return stub
   }
 
-  const audio = fs.readFileSync(filePath)
-  if (audio.length < 64) {
-    console.error(
-      `[deepgram] archivo demasiado pequeño (${audio.length} B): ${filePath}`,
+  const st = await fs.promises.stat(filePath)
+  const MAX_SYNC = 256 * 1024 * 1024
+  if (st.size > MAX_SYNC) {
+    throw new Error(
+      `Audio demasiado grande para transcribir en este proceso (${Math.round(st.size / 1024 / 1024)} MiB). Partilo antes.`,
     )
+  }
+  if (st.size < 64) {
+    console.error(`[deepgram] archivo demasiado pequeño (${st.size} B): ${filePath}`)
     const stub = stubTranscript(title)
     onProgress?.(stub.text, { chunk: 1, total: 1, emptyStreak: 0 })
     return stub
   }
+  const audio = await fs.promises.readFile(filePath)
 
   const detected = detectAudioFormat(audio)
   const mime =

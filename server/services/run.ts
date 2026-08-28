@@ -50,14 +50,19 @@ function toPublic(row: AppRunRow, until?: Date): AppRun {
 }
 
 export function getCurrentRun(): AppRun | null {
-  const db = getDb()
-  backfillCurrentRun(db)
-  const row = db
-    .prepare(
-      `SELECT * FROM app_runs WHERE status = 'current' LIMIT 1`,
-    )
-    .get() as AppRunRow | undefined
-  return row ? toPublic(row) : null
+  try {
+    const db = getDb()
+    backfillCurrentRun(db)
+    const row = db
+      .prepare(
+        `SELECT * FROM app_runs WHERE status = 'current' LIMIT 1`,
+      )
+      .get() as AppRunRow | undefined
+    return row ? toPublic(row) : null
+  } catch (err) {
+    console.error('[run] getCurrentRun', err)
+    return null
+  }
 }
 
 export function toBackupRunMeta(
@@ -104,7 +109,25 @@ function namesMatch(a: string, b: string): boolean {
 
 function insertOperator(name: string, now: string): { id: string; name: string } {
   const db = getDb()
+  const existing = db
+    .prepare(
+      `SELECT id, name FROM persons
+       WHERE lower(name) = lower(?)
+         AND (merged_into IS NULL OR merged_into = '')
+       ORDER BY CASE WHEN is_operator = 1 THEN 0 ELSE 1 END
+       LIMIT 1`,
+    )
+    .get(name) as { id: string; name: string } | undefined
+
   db.prepare(`UPDATE persons SET is_operator = 0, updated_at = ?`).run(now)
+
+  if (existing) {
+    db.prepare(
+      `UPDATE persons SET is_operator = 1, updated_at = ? WHERE id = ?`,
+    ).run(now, existing.id)
+    return { id: existing.id, name: existing.name }
+  }
+
   const id = randomUUID()
   db.prepare(
     `INSERT INTO persons (
@@ -145,6 +168,9 @@ export function startRun(rawName: unknown): AppRun {
   }
   const existing = getCurrentRun()
   if (existing) {
+    if (namesMatch(existing.operator_name, name)) {
+      return existing
+    }
     throw new Error('Ya hay una RUN en curso')
   }
   const now = new Date().toISOString()

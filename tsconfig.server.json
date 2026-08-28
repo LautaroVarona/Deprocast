@@ -7,9 +7,9 @@
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "outDir": "dist-server",
-    "rootDir": "server",
+    "rootDir": ".",
+    "noEmit": true,
     "types": ["node"]
   },
-  "include": ["server"]
+  "include": ["server", "shared"]
 }

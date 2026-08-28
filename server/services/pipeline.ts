@@ -25,6 +25,8 @@ import {
   parseSpeakerMap,
 } from './audioCriba.js'
 import { parseManualTags } from './bookmarkProcess.js'
+import { waitWhile } from './wait.js'
+import { resolveContained } from './paths.js'
 
 let running = false
 let paused = false
@@ -34,6 +36,7 @@ let currentEntryId: string | null = null
 const abortedIds = new Set<string>()
 /** Generación del drenado: al forzar unlock se invalida el drain viejo. */
 let drainGen = 0
+const activeDrains = new Set<number>()
 let lastProgressAt = Date.now()
 
 export type PipelineStage =
@@ -149,14 +152,19 @@ export function recoverOrphanedProcessing(): number {
   return n
 }
 
-/** Invalida el drain actual y libera el flag running. */
-function forceUnlockPipeline(reason: string): void {
+/** Invalida el drain actual y espera a que el worker previo suelte el lock. */
+async function forceUnlockPipeline(reason: string): Promise<void> {
   console.warn(`[pipeline] force unlock: ${reason}`)
   drainGen += 1
   if (currentEntryId) abortedIds.add(currentEntryId)
-  currentEntryId = null
-  running = false
-  recoverOrphanedProcessing()
+  await waitWhile(() => activeDrains.size > 0, 15_000)
+  if (activeDrains.size > 0 || running) {
+    console.warn('[pipeline] lease expirado — se libera el lock')
+    activeDrains.clear()
+    running = false
+    currentEntryId = null
+    recoverOrphanedProcessing()
+  }
 }
 
 /** Quita un id de la cola en memoria (p.ej. al eliminar una carga). */
@@ -213,6 +221,14 @@ export function resumePipeline(): { paused: boolean } {
   return { paused: false }
 }
 
+export async function waitPipelineIdle(ms: number): Promise<void> {
+  await waitWhile(() => running || activeDrains.size > 0, ms)
+}
+
+export function isPipelineBusy(): boolean {
+  return running
+}
+
 export async function enqueuePipeline(entryIds?: string[]): Promise<{
   accepted: string[]
   message: string
@@ -227,7 +243,7 @@ export async function enqueuePipeline(entryIds?: string[]): Promise<{
 
   if (running) {
     if (!currentEntryId || stuckMs > STUCK_MS) {
-      forceUnlockPipeline(
+      await forceUnlockPipeline(
         !currentEntryId
           ? 'running sin currentEntry'
           : `sin progreso ${Math.round(stuckMs / 1000)}s`,
@@ -309,11 +325,12 @@ function shouldAbort(entryId: string): boolean {
 }
 
 async function drainQueue(): Promise<void> {
-  if (running) {
+  if (running || activeDrains.size > 0) {
     console.warn('[pipeline] drainQueue skipped — already running')
     return
   }
   const gen = ++drainGen
+  activeDrains.add(gen)
   running = true
   syncLiveCounts()
   console.log(`[pipeline] drain start gen=${gen} queue=${queue.length}`)
@@ -359,6 +376,7 @@ async function drainQueue(): Promise<void> {
       }
     }
   } finally {
+    activeDrains.delete(gen)
     if (gen === drainGen) {
       running = false
       if (paused) {
@@ -375,6 +393,9 @@ async function drainQueue(): Promise<void> {
         })
       }
       console.log(`[pipeline] drain end gen=${gen}`)
+    } else {
+      if (activeDrains.size === 0) running = false
+      console.warn(`[pipeline] drain gen=${gen} superseded — lock liberado`)
     }
   }
 }
@@ -429,7 +450,8 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
   if (!entry.vault_path) {
     throw new Error(`Entry ${entryId} has no vault_path`)
   }
-  const absPath = path.resolve(process.cwd(), entry.vault_path)
+  const rel = entry.vault_path.replaceAll('\\', '/')
+  const absPath = resolveContained(process.cwd(), rel)
 
   if (!entry.parent_entry_id) {
     const partsDir = path.join(path.dirname(absPath), 'parts')
@@ -544,13 +566,18 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
     console.warn(`[pipeline] ${entryId} audio analysis:`, err)
   }
 
-  db.prepare(
+  if (shouldAbort(entryId)) {
+    console.log(`[pipeline] abort before persist ${entryId}`)
+    return
+  }
+
+  const persisted = db.prepare(
     `UPDATE entries SET
        content_raw = ?, timestamp_exact = ?, status = 'pending_criba',
        diarization_json = ?, speaker_map = ?,
        audio_analysis_json = COALESCE(?, audio_analysis_json),
        duration_sec = COALESCE(?, duration_sec)
-     WHERE id = ?`,
+     WHERE id = ? AND status = 'processing'`,
   ).run(
     text,
     timestampExact,
@@ -560,6 +587,10 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
     analysisDuration,
     entryId,
   )
+  if (persisted.changes === 0) {
+    console.warn(`[pipeline] CAS persist omitido ${entryId}`)
+    return
+  }
 
   if (enhanceOnIngest() && entry.vault_path) {
     const out = enhancedAudioPath(entry.vault_path)
@@ -633,10 +664,10 @@ function spawnSplitChildren(
       notebookId,
       title,
       vaultPath,
-      parent.timestamp_exact,
+      parent.timestamp_exact ?? null,
       now,
       original,
-      parent.batch_id,
+      parent.batch_id ?? null,
       parent.id,
       parent.manual_tags ?? '[]',
       parent.operator_note ?? '',
@@ -755,6 +786,10 @@ async function extractAfterVote(entry: Entry): Promise<void> {
         category: e.category,
         status: e.status,
         tactical_focus: e.tactical_focus,
+        deprocast_tipo: e.deprocast_tipo,
+        variante: e.variante,
+        canonico: e.canonico,
+        alias_de: e.alias_de,
         ...(slop && e.type === 'person' && ruido
           ? {
               discard_hint: 'ruido',

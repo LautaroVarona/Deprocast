@@ -1,5 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 import { formatDuration, useSmartAudioPlayback } from '../hooks/useSmartAudioPlayback'
+import {
+  activeBlockIndex,
+  autosizeTextarea,
+  blocksFromDiarization,
+  extractNameCandidates,
+  serializeTranscriptBlocks,
+  type TranscriptBlock,
+} from '../lib/audioTranscript'
+import { getTextareaCaretRect } from '../lib/textareaCaret'
 import { api } from '../services/api'
 import type {
   AudioAnalysisPayload,
@@ -8,6 +24,8 @@ import type {
   Entry,
   SpeakerAssignment,
 } from '../types'
+import { mentionKindLabel, MentionMenu, type MentionMenuHit } from './MentionMenu'
+import { SpeakerBadge } from './SpeakerBadge'
 import { TagField } from './TagField'
 
 type Props = {
@@ -16,6 +34,32 @@ type Props = {
 }
 
 type OperatorInfo = { id: string; name: string }
+
+const TAG_KINDS: BookmarkManualTag['kind'][] = [
+  'person',
+  'project',
+  'dominio',
+  'agrupacion',
+  'geografia',
+]
+
+function isTagKind(v: string): v is BookmarkManualTag['kind'] {
+  return (TAG_KINDS as string[]).includes(v)
+}
+
+function mentionQueryAt(
+  text: string,
+  caret: number,
+): { start: number; query: string } | null {
+  const before = text.slice(0, caret)
+  const at = before.lastIndexOf('@')
+  if (at < 0) return null
+  if (at > 0 && /[\wÀ-ÿ]/.test(before[at - 1] ?? '')) return null
+  const fragment = before.slice(at + 1)
+  if (/[\s\n]/.test(fragment)) return null
+  if (fragment.length > 48) return null
+  return { start: at, query: fragment }
+}
 
 function keyToWeight(e: KeyboardEvent): number | null {
   const k = e.key
@@ -50,9 +94,9 @@ function parseTags(raw: string | null | undefined): BookmarkManualTag[] {
       (t): t is BookmarkManualTag =>
         !!t &&
         typeof t === 'object' &&
-        (t.kind === 'person' || t.kind === 'project' || t.kind === 'dominio') &&
-        typeof t.entity_id === 'string' &&
-        typeof t.entity_name === 'string',
+        isTagKind(String((t as BookmarkManualTag).kind)) &&
+        typeof (t as BookmarkManualTag).entity_id === 'string' &&
+        typeof (t as BookmarkManualTag).entity_name === 'string',
     )
   } catch {
     return []
@@ -93,6 +137,10 @@ function parseAnalysis(raw: string | null | undefined): AudioAnalysisPayload | n
   } catch {
     return null
   }
+}
+
+function tagKey(t: BookmarkManualTag): string {
+  return `${t.kind}:${t.entity_id}`
 }
 
 function AudioTimeline({
@@ -174,25 +222,46 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [title, setTitle] = useState('')
   const [timestamp, setTimestamp] = useState('')
-  const [transcript, setTranscript] = useState('')
+  const [blocks, setBlocks] = useState<TranscriptBlock[]>([])
   const [note, setNote] = useState('')
   const [tags, setTags] = useState<BookmarkManualTag[]>([])
   const [speakers, setSpeakers] = useState<SpeakerAssignment[]>([])
   const [analysis, setAnalysis] = useState<AudioAnalysisPayload | null>(null)
 
+  const [mentionOpen, setMentionOpen] = useState(false)
+  const [mentionHits, setMentionHits] = useState<MentionMenuHit[]>([])
+  const [mentionIdx, setMentionIdx] = useState(0)
+  const [mentionBusy, setMentionBusy] = useState(false)
+  const [mentionBlock, setMentionBlock] = useState<number | null>(null)
+  const [mentionRange, setMentionRange] = useState<{
+    start: number
+    end: number
+  } | null>(null)
+  const [mentionAnchor, setMentionAnchor] = useState<{
+    top: number
+    left: number
+    height: number
+  } | null>(null)
+
   const audioRef = useRef<HTMLAudioElement>(null)
+  const blockTaRefs = useRef<(HTMLTextAreaElement | null)[]>([])
+  const blockEls = useRef<(HTMLElement | null)[]>([])
   const loadInFlight = useRef(false)
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeRef = useRef<Entry | null>(null)
   const analysisRequested = useRef<string | null>(null)
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchAbort = useRef<AbortController | null>(null)
+  const autoAbort = useRef<AbortController | null>(null)
+  const autoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const dismissedAuto = useRef<Set<string>>(new Set())
+  const autoKeys = useRef<Set<string>>(new Set())
+  const suppressPersist = useRef(true)
 
   const active = entries[idx] ?? null
   activeRef.current = active
 
-  const diarization = useMemo(
-    () => parseDiarization(active?.diarization_json),
-    [active?.diarization_json],
-  )
+  const transcript = useMemo(() => serializeTranscriptBlocks(blocks), [blocks])
 
   const requestAnalysis = useCallback(async () => {
     const entry = activeRef.current
@@ -265,10 +334,17 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
 
   useEffect(() => {
     analysisRequested.current = null
+    dismissedAuto.current = new Set()
+    autoKeys.current = new Set()
+    suppressPersist.current = true
+    setMentionOpen(false)
+    setMentionHits([])
+    setMentionRange(null)
+    setMentionBlock(null)
     if (!active) {
       setTitle('')
       setTimestamp('')
-      setTranscript('')
+      setBlocks([])
       setNote('')
       setTags([])
       setSpeakers([])
@@ -277,12 +353,12 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     }
     setTitle(active.title)
     setTimestamp(toDatetimeLocal(active.timestamp_exact))
-    setTranscript(active.content_raw ?? '')
+    const dia = parseDiarization(active.diarization_json)
+    setBlocks(blocksFromDiarization(dia?.utterances ?? [], active.content_raw ?? ''))
     setNote(active.operator_note ?? '')
     setTags(parseTags(active.manual_tags))
     setAnalysis(parseAnalysis(active.audio_analysis_json))
     const mapped = parseSpeakerMap(active.speaker_map)
-    const dia = parseDiarization(active.diarization_json)
     if (mapped.length > 0) {
       setSpeakers(mapped)
     } else if (dia?.speakers?.length) {
@@ -296,12 +372,244 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     } else {
       setSpeakers([{ speaker: 0, person_id: null, person_name: null }])
     }
+    const t = window.setTimeout(() => {
+      suppressPersist.current = false
+    }, 120)
+    return () => window.clearTimeout(t)
   }, [active?.id])
 
   const personTags = useMemo(
     () => tags.filter((t) => t.kind === 'person'),
     [tags],
   )
+
+  const taggedIds = useMemo(
+    () => new Set(tags.map((t) => tagKey(t))),
+    [tags],
+  )
+
+  const karaokeIdx = useMemo(
+    () => activeBlockIndex(blocks, playback.currentTime),
+    [blocks, playback.currentTime],
+  )
+
+  useEffect(() => {
+    const el = karaokeIdx >= 0 ? blockEls.current[karaokeIdx] : null
+    if (!el) return
+    const focused = document.activeElement
+    if (
+      focused instanceof HTMLTextAreaElement &&
+      !el.contains(focused)
+    ) {
+      return
+    }
+    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [karaokeIdx])
+
+  useEffect(() => {
+    blockTaRefs.current.forEach((ta) => autosizeTextarea(ta))
+  }, [blocks.length, active?.id])
+
+  useEffect(() => {
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current)
+      searchAbort.current?.abort()
+      if (autoTimer.current) clearTimeout(autoTimer.current)
+      autoAbort.current?.abort()
+    }
+  }, [])
+
+  const runMentionSearch = useCallback((query: string) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    searchAbort.current?.abort()
+    if (!query.trim()) {
+      setMentionBusy(false)
+      return
+    }
+    setMentionBusy(true)
+    searchTimer.current = setTimeout(() => {
+      const ac = new AbortController()
+      searchAbort.current = ac
+      void (async () => {
+        try {
+          const res = await api.typeaheadEntities(query, {
+            kinds: TAG_KINDS,
+            limit: 10,
+            scope: 'masters',
+            signal: ac.signal,
+          })
+          if (ac.signal.aborted) return
+          const hits: MentionMenuHit[] = res.results
+            .filter((h): h is typeof h & { kind: BookmarkManualTag['kind'] } =>
+              isTagKind(h.kind),
+            )
+            .map((h) => ({
+              kind: h.kind,
+              entity_id: h.id,
+              entity_name: h.label,
+              subtitle: h.subtitle,
+            }))
+          setMentionHits(hits)
+          setMentionIdx(0)
+        } catch {
+          if (!ac.signal.aborted) setMentionHits([])
+        } finally {
+          if (!ac.signal.aborted) setMentionBusy(false)
+        }
+      })()
+    }, 150)
+  }, [])
+
+  const applyTranscriptMention = useCallback(
+    (hit: MentionMenuHit, multi = false) => {
+      if (mentionBlock == null || !mentionRange) return
+      if (!isTagKind(hit.kind)) return
+      const block = blocks[mentionBlock]
+      const ta = blockTaRefs.current[mentionBlock]
+      if (!block || !ta) return
+      const before = block.text.slice(0, mentionRange.start)
+      const after = block.text.slice(mentionRange.end)
+      const insert = multi ? `@${hit.entity_name} @` : `@${hit.entity_name} `
+      const nextText = `${before}${insert}${after}`
+      const nextTags = [
+        ...tags.filter(
+          (t) => !(t.kind === hit.kind && t.entity_id === hit.entity_id),
+        ),
+        {
+          kind: hit.kind,
+          entity_id: hit.entity_id,
+          entity_name: hit.entity_name,
+        } satisfies BookmarkManualTag,
+      ]
+      setBlocks((prev) =>
+        prev.map((b, i) => (i === mentionBlock ? { ...b, text: nextText } : b)),
+      )
+      setTags(nextTags)
+      setMentionOpen(false)
+      setMentionHits([])
+      setMentionRange(null)
+      requestAnimationFrame(() => {
+        const pos = before.length + insert.length
+        ta.focus()
+        ta.setSelectionRange(pos, pos)
+        autosizeTextarea(ta)
+        if (multi) {
+          const q = mentionQueryAt(nextText, pos)
+          if (q) {
+            setMentionOpen(true)
+            setMentionRange({ start: q.start, end: pos })
+            setMentionAnchor(getTextareaCaretRect(ta, pos))
+            runMentionSearch(q.query)
+          }
+        }
+      })
+    },
+    [mentionBlock, mentionRange, blocks, tags, runMentionSearch],
+  )
+
+  const onBlockChange = (blockIdx: number, value: string) => {
+    setBlocks((prev) =>
+      prev.map((b, i) => (i === blockIdx ? { ...b, text: value } : b)),
+    )
+    const ta = blockTaRefs.current[blockIdx]
+    autosizeTextarea(ta)
+    const caret = ta?.selectionStart ?? value.length
+    const q = mentionQueryAt(value, caret)
+    if (!q) {
+      setMentionOpen(false)
+      setMentionHits([])
+      setMentionRange(null)
+      setMentionBlock(null)
+      return
+    }
+    setMentionBlock(blockIdx)
+    setMentionOpen(true)
+    setMentionRange({ start: q.start, end: caret })
+    if (ta) setMentionAnchor(getTextareaCaretRect(ta, caret))
+    runMentionSearch(q.query)
+  }
+
+  const onBlockKeyDown = (
+    e: ReactKeyboardEvent<HTMLTextAreaElement>,
+    blockIdx: number,
+  ) => {
+    if (!mentionOpen || mentionBlock !== blockIdx) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      if (mentionHits.length > 0) {
+        setMentionIdx((i) => (i + 1) % mentionHits.length)
+      }
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (mentionHits.length > 0) {
+        setMentionIdx((i) => (i - 1 + mentionHits.length) % mentionHits.length)
+      }
+      return
+    }
+    if ((e.key === 'Enter' || e.key === 'Tab') && mentionHits.length > 0) {
+      e.preventDefault()
+      applyTranscriptMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setMentionOpen(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!active || mentionOpen) return
+    const corpus = `${transcript}\n${note}`
+    const candidates = extractNameCandidates(corpus)
+    if (candidates.length === 0) return
+    if (autoTimer.current) clearTimeout(autoTimer.current)
+    autoAbort.current?.abort()
+    autoTimer.current = setTimeout(() => {
+      const ac = new AbortController()
+      autoAbort.current = ac
+      void (async () => {
+        const found: BookmarkManualTag[] = []
+        for (const q of candidates) {
+          if (ac.signal.aborted) return
+          try {
+            const res = await api.typeaheadEntities(q, {
+              kinds: TAG_KINDS,
+              limit: 3,
+              scope: 'masters',
+              signal: ac.signal,
+            })
+            const hit = res.results.find((h) => isTagKind(h.kind))
+            if (!hit || !isTagKind(hit.kind)) continue
+            const short = q.trim().length < 5
+            if (short && hit.score < 0.92) continue
+            if (hit.score < 0.72) continue
+            const key = `${hit.kind}:${hit.id}`
+            if (dismissedAuto.current.has(key)) continue
+            found.push({
+              kind: hit.kind,
+              entity_id: hit.id,
+              entity_name: hit.label,
+            })
+          } catch {
+            /* ignore */
+          }
+        }
+        if (ac.signal.aborted || found.length === 0) return
+        setTags((prev) => {
+          const seen = new Set(prev.map(tagKey))
+          const add = found.filter((t) => !seen.has(tagKey(t)))
+          if (add.length === 0) return prev
+          return [...prev, ...add]
+        })
+        for (const t of found) autoKeys.current.add(tagKey(t))
+      })()
+    }, 480)
+    return () => {
+      if (autoTimer.current) clearTimeout(autoTimer.current)
+      autoAbort.current?.abort()
+    }
+  }, [active, transcript, note, mentionOpen])
 
   const operatorTag = useMemo((): BookmarkManualTag | null => {
     if (!operator) return null
@@ -326,48 +634,20 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     [transcript, note, tags, speakers, title, timestamp],
   )
 
-  const persistMeta = useCallback(
-    async (entry: Entry) => {
-      const nextTitle = title.trim()
-      const iso = fromDatetimeLocal(timestamp)
-      const titleChanged = Boolean(nextTitle && nextTitle !== entry.title)
-      const tsChanged = Boolean(iso && iso !== entry.timestamp_exact)
-      if (!titleChanged && !tsChanged) return
-      try {
-        await api.patchAudioCriba(entry.id, {
-          ...(titleChanged ? { title: nextTitle } : {}),
-          ...(iso && tsChanged ? { timestamp_exact: iso } : {}),
-        })
-        setEntries((prev) =>
-          prev.map((e) =>
-            e.id === entry.id
-              ? {
-                  ...e,
-                  ...(titleChanged
-                    ? { title: nextTitle, title_manual: 1 }
-                    : {}),
-                  ...(iso && tsChanged ? { timestamp_exact: iso } : {}),
-                }
-              : e,
-          ),
-        )
-      } catch {
-        /* el voto persiste el mismo payload */
-      }
-    },
-    [title, timestamp],
-  )
-
   useEffect(() => {
-    if (!activeRef.current) return
+    if (suppressPersist.current || !activeRef.current) return
     if (persistTimer.current) clearTimeout(persistTimer.current)
     persistTimer.current = setTimeout(() => {
-      if (activeRef.current) void persistMeta(activeRef.current)
-    }, 700)
+      const entry = activeRef.current
+      if (!entry || suppressPersist.current) return
+      void api.patchAudioCriba(entry.id, cribaPatch(entry)).catch(() => {
+        /* el voto persiste el mismo payload */
+      })
+    }, 800)
     return () => {
       if (persistTimer.current) clearTimeout(persistTimer.current)
     }
-  }, [persistMeta])
+  }, [cribaPatch])
 
   const vote = useCallback(
     async (weight: number) => {
@@ -392,21 +672,49 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     [active, busy, cribaPatch, onChanged],
   )
 
+  const seekRel = useCallback(
+    (dir: 1 | -1) => {
+      const t = playback.currentTime
+      const timed = blocks.filter((b) => b.end > b.start)
+      if (timed.length === 0) {
+        if (dir === 1) playback.nextSegment()
+        else playback.prevSegment()
+        return
+      }
+      if (dir === 1) {
+        const next = timed.find((b) => b.start >= t + 0.15)
+        if (next) playback.seekTo(next.start)
+        else playback.nextSegment()
+        return
+      }
+      let prev: TranscriptBlock | null = null
+      for (const b of timed) {
+        if (b.start >= t - 0.2) break
+        prev = b
+      }
+      if (prev) playback.seekTo(prev.start)
+      else playback.prevSegment()
+    },
+    [blocks, playback],
+  )
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
       const tag = t?.tagName
+      if (t?.closest('.mention-pop, .speaker-pop')) return
+      if (mentionOpen) return
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (t?.isContentEditable) return
 
       if (e.key === 'ArrowRight' || e.key === 'n' || e.key === 'N') {
         e.preventDefault()
-        playback.nextSegment()
+        seekRel(1)
         return
       }
       if (e.key === 'ArrowLeft' || e.key === 'p' || e.key === 'P') {
         e.preventDefault()
-        playback.prevSegment()
+        seekRel(-1)
         return
       }
 
@@ -417,7 +725,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [vote, playback])
+  }, [vote, seekRel, mentionOpen])
 
   function assignSpeaker(speaker: number, tag: BookmarkManualTag | null) {
     setSpeakers((prev) =>
@@ -431,6 +739,39 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
           : s,
       ),
     )
+    if (tag?.kind === 'person') {
+      setTags((prev) => {
+        if (prev.some((t) => t.kind === 'person' && t.entity_id === tag.entity_id)) {
+          return prev
+        }
+        return [...prev, tag]
+      })
+    }
+  }
+
+  function assignmentFor(speaker: number): SpeakerAssignment | undefined {
+    return speakers.find((s) => s.speaker === speaker)
+  }
+
+  function removeTag(tag: BookmarkManualTag) {
+    const key = tagKey(tag)
+    dismissedAuto.current.add(key)
+    autoKeys.current.delete(key)
+    setTags((prev) =>
+      prev.filter((t) => !(t.kind === tag.kind && t.entity_id === tag.entity_id)),
+    )
+  }
+
+  function focusTagInTranscript(tag: BookmarkManualTag) {
+    const needle = tag.entity_name.trim().toLowerCase()
+    if (!needle) return
+    const i = blocks.findIndex((b) => b.text.toLowerCase().includes(needle))
+    if (i < 0) return
+    const el = blockEls.current[i]
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const b = blocks[i]
+    if (b && b.end > b.start) playback.seekTo(b.start)
+    blockTaRefs.current[i]?.focus()
   }
 
   if (loading && entries.length === 0) {
@@ -468,7 +809,6 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
             value={title}
             disabled={busy}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={() => void persistMeta(active)}
           />
         </label>
         <label className="field">
@@ -478,7 +818,6 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
             value={timestamp}
             disabled={busy}
             onChange={(e) => setTimestamp(e.target.value)}
-            onBlur={() => void persistMeta(active)}
           />
         </label>
       </div>
@@ -509,7 +848,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
           <button
             type="button"
             className="btn btn-tiny"
-            onClick={() => playback.prevSegment()}
+            onClick={() => seekRel(-1)}
             title="Segmento anterior (← / p)"
           >
             ‹ Seg
@@ -517,7 +856,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
           <button
             type="button"
             className="btn btn-tiny"
-            onClick={() => playback.nextSegment()}
+            onClick={() => seekRel(1)}
             title="Siguiente segmento (→ / n)"
           >
             Seg ›
@@ -543,109 +882,195 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
             onSeek={playback.seekTo}
           />
         ) : null}
-        {diarization && diarization.utterances.length > 0 ? (
-          <ul className="audio-utterance-list">
-            {diarization.utterances.map((u, i) => {
-              const activeUtterance =
-                playback.currentTime >= u.start && playback.currentTime < u.end
-              return (
-                <li key={`${u.start}-${i}`}>
-                  <button
-                    type="button"
-                    className={
-                      activeUtterance
-                        ? 'audio-utterance-btn is-active'
-                        : 'audio-utterance-btn'
-                    }
-                    onClick={() => playback.seekTo(u.start)}
-                  >
-                    <span className="mono audio-utterance-ts">
-                      {formatDuration(u.start)}
-                    </span>
-                    <span className="mono">S{u.speaker}</span>
-                    <span className="audio-utterance-text">{u.transcript}</span>
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
-        ) : null}
       </div>
 
       <div className="audio-criba-main">
-        <label className="audio-criba-transcript">
-          Transcripción
-          <textarea
-            value={transcript}
-            onChange={(e) => setTranscript(e.target.value)}
-            spellCheck
-            disabled={busy}
+        <div className="audio-criba-transcript">
+          <div className="audio-transcript-head">
+            <span>Transcripción</span>
+            <span className="audio-transcript-head-meta mono">
+              {blocks.length} bloque{blocks.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div className="audio-transcript-blocks" role="list">
+            {blocks.map((b, i) => {
+              const showBadge = i === 0 || blocks[i - 1]?.speaker !== b.speaker
+              const isActive = i === karaokeIdx
+              const assignment = assignmentFor(b.speaker)
+              return (
+                <article
+                  key={`${b.start}-${b.speaker}-${i}`}
+                  ref={(el) => {
+                    blockEls.current[i] = el
+                  }}
+                  className={
+                    isActive ? 'audio-utterance is-active' : 'audio-utterance'
+                  }
+                  role="listitem"
+                >
+                  <button
+                    type="button"
+                    className="audio-utterance-gutter mono"
+                    title="Ir a este momento"
+                    onClick={() => {
+                      if (b.end > b.start) playback.seekTo(b.start)
+                    }}
+                  >
+                    {b.end > b.start ? formatDuration(b.start) : '—'}
+                  </button>
+                  <div className="audio-utterance-body">
+                    {showBadge ? (
+                      <SpeakerBadge
+                        speaker={b.speaker}
+                        assignment={assignment}
+                        operatorTag={operatorTag}
+                        personTags={personTags}
+                        suggested={
+                          suggestOperatorForSpeaker &&
+                          b.speaker === speakers[0]?.speaker
+                        }
+                        disabled={busy}
+                        onAssign={(tag) => assignSpeaker(b.speaker, tag)}
+                      />
+                    ) : null}
+                    <textarea
+                      ref={(el) => {
+                        blockTaRefs.current[i] = el
+                      }}
+                      className="audio-utterance-ta"
+                      value={b.text}
+                      rows={1}
+                      spellCheck
+                      disabled={busy}
+                      placeholder={
+                        i === 0
+                          ? 'Texto de la intervención… @ para etiquetar'
+                          : undefined
+                      }
+                      onChange={(e) => onBlockChange(i, e.target.value)}
+                      onKeyDown={(e) => onBlockKeyDown(e, i)}
+                      onInput={(e) =>
+                        autosizeTextarea(e.currentTarget)
+                      }
+                      onFocus={() => {
+                        if (b.end > b.start) playback.seekTo(b.start)
+                      }}
+                      onScroll={() => {
+                        if (mentionOpen && mentionBlock === i) {
+                          const ta = blockTaRefs.current[i]
+                          if (ta) {
+                            setMentionAnchor(
+                              getTextareaCaretRect(ta, ta.selectionStart),
+                            )
+                          }
+                        }
+                      }}
+                      onClick={() => {
+                        if (mentionOpen && mentionBlock === i) {
+                          const ta = blockTaRefs.current[i]
+                          if (ta) {
+                            setMentionAnchor(
+                              getTextareaCaretRect(ta, ta.selectionStart),
+                            )
+                          }
+                        }
+                      }}
+                    />
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+          <MentionMenu
+            open={mentionOpen}
+            hits={mentionHits}
+            activeIdx={mentionIdx}
+            busy={mentionBusy}
+            anchor={mentionAnchor}
+            taggedIds={taggedIds}
+            onHoverIdx={setMentionIdx}
+            onPick={applyTranscriptMention}
           />
-        </label>
+        </div>
 
         <div className="audio-criba-side">
           <div>
             <p className="blob-composer-label">Voces</p>
-            <ul className="audio-speaker-list">
+            <ul className="audio-voice-legend">
               {speakers.map((s) => (
                 <li key={s.speaker}>
-                  <span className="mono">Speaker {s.speaker}</span>
-                  <span className="audio-speaker-name">
-                    {s.person_name ?? 'sin asignar'}
-                    {suggestOperatorForSpeaker &&
-                    s.speaker === speakers[0]?.speaker &&
-                    !s.person_id ? (
-                      <span className="audio-speaker-suggested"> sugerido</span>
-                    ) : null}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-tiny"
-                    onClick={() => assignSpeaker(s.speaker, null)}
-                  >
-                    —
-                  </button>
-                  {operatorTag ? (
-                    <button
-                      type="button"
-                      className={
-                        s.person_id === operatorTag.entity_id
-                          ? 'btn btn-tiny is-on'
-                          : suggestOperatorForSpeaker &&
-                              s.speaker === speakers[0]?.speaker &&
-                              !s.person_id
-                            ? 'btn btn-tiny is-suggested'
-                            : 'btn btn-tiny'
-                      }
-                      onClick={() => assignSpeaker(s.speaker, operatorTag)}
-                    >
-                      Yo — {operatorTag.entity_name}
-                    </button>
-                  ) : null}
-                  {personTags.map((tag) => (
-                    <button
-                      key={tag.entity_id}
-                      type="button"
-                      className={
-                        s.person_id === tag.entity_id
-                          ? 'btn btn-tiny is-on'
-                          : 'btn btn-tiny'
-                      }
-                      onClick={() => assignSpeaker(s.speaker, tag)}
-                    >
-                      @{tag.entity_name}
-                    </button>
-                  ))}
+                  <SpeakerBadge
+                    speaker={s.speaker}
+                    assignment={s}
+                    operatorTag={operatorTag}
+                    personTags={personTags}
+                    suggested={
+                      suggestOperatorForSpeaker &&
+                      s.speaker === speakers[0]?.speaker
+                    }
+                    disabled={busy}
+                    onAssign={(tag) => assignSpeaker(s.speaker, tag)}
+                  />
                 </li>
               ))}
             </ul>
           </div>
           <div>
             <p className="blob-composer-label">Tags</p>
+            {tags.length > 0 ? (
+              <ul className="audio-entity-chips">
+                {tags.map((tag) => {
+                  const auto = autoKeys.current.has(tagKey(tag))
+                  return (
+                    <li key={tagKey(tag)}>
+                      <button
+                        type="button"
+                        className={`audio-entity-chip kind-${tag.kind}${
+                          auto ? ' is-auto' : ''
+                        }`}
+                        title={`${mentionKindLabel(tag.kind)} · vinculado al grafo`}
+                        onClick={() => focusTagInTranscript(tag)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Backspace' || e.key === 'Delete') {
+                            e.preventDefault()
+                            removeTag(tag)
+                          }
+                        }}
+                      >
+                        <span className="audio-entity-chip-kind">
+                          {mentionKindLabel(tag.kind)}
+                        </span>
+                        <span className="audio-entity-chip-name">
+                          @{tag.entity_name}
+                        </span>
+                        <span
+                          role="button"
+                          tabIndex={-1}
+                          className="audio-entity-chip-x"
+                          aria-label={`Quitar ${tag.entity_name}`}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            removeTag(tag)
+                          }}
+                        >
+                          ×
+                        </span>
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : (
+              <p className="muted audio-tags-empty">
+                Entidades detectadas aparecen acá. @ en el texto también.
+              </p>
+            )}
             <TagField
               tags={tags}
               note={note}
               disabled={busy}
+              placeholder="@ personas, grupos, lugares o proyectos. Nota libre opcional."
+              showChips={false}
               onChange={({ tags: nextTags, note: nextNote }) => {
                 setTags(nextTags)
                 setNote(nextNote)

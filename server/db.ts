@@ -36,14 +36,54 @@ export function getDb(): DatabaseSync {
   return db
 }
 
+/** Abre un archivo SQLite, aplica migraciones y opcionalmente seeds. */
+export function openDbFile(
+  filePath: string,
+  opts?: { seed?: boolean },
+): DatabaseSync {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const database = new DatabaseSync(filePath)
+  database.exec('PRAGMA journal_mode = WAL')
+  database.exec('PRAGMA foreign_keys = ON')
+  database.exec('PRAGMA busy_timeout = 5000')
+  migrate(database)
+  if (opts?.seed !== false) seed(database)
+  return database
+}
+
 export function initDb(): DatabaseSync {
   fs.mkdirSync(DATA_DIR, { recursive: true })
-  db = new DatabaseSync(DB_PATH)
-  db.exec('PRAGMA journal_mode = WAL')
-  db.exec('PRAGMA foreign_keys = ON')
-  migrate(db)
-  seed(db)
+  db = openDbFile(DB_PATH, { seed: true })
   return db
+}
+
+export function closeDb(): void {
+  if (!db) return
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
+  } catch {
+    /* ignore */
+  }
+  try {
+    db.close()
+  } catch {
+    /* ignore */
+  }
+  db = undefined as unknown as DatabaseSync
+}
+
+export function reopenDb(): DatabaseSync {
+  return initDb()
+}
+
+export function getDbPath(): string {
+  return DB_PATH
+}
+
+export function foreignKeyViolations(): Array<Record<string, unknown>> {
+  return getDb().prepare('PRAGMA foreign_key_check').all() as Array<
+    Record<string, unknown>
+  >
 }
 
 function migrate(database: DatabaseSync): void {
@@ -222,16 +262,6 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'entries', 'duration_sec', 'REAL')
   ensureColumn(database, 'entries', 'audio_analysis_json', 'TEXT')
   ensureColumn(database, 'entries', 'place_id', 'TEXT')
-  ensureColumn(database, 'geografia', 'parent_id', 'TEXT')
-  ensureColumn(database, 'geografia', 'admin_type', 'TEXT')
-  ensureColumn(database, 'geografia', 'admin_code', 'TEXT')
-  ensureColumn(database, 'geografia', 'capital_name', 'TEXT')
-  ensureColumn(database, 'geografia', 'iso_country', 'TEXT')
-  ensureColumn(database, 'geografia', 'human_weight', 'INTEGER NOT NULL DEFAULT 0')
-  ensureColumn(database, 'geografia', 'sort_order', 'INTEGER NOT NULL DEFAULT 0')
-  database.exec(
-    `CREATE INDEX IF NOT EXISTS idx_geografia_parent ON geografia(parent_id)`,
-  )
   ensureColumn(database, 'persons', 'merged_into', 'TEXT')
   ensureColumn(database, 'persons', 'is_operator', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn(database, 'projects', 'merged_into', 'TEXT')
@@ -444,6 +474,11 @@ function migrate(database: DatabaseSync): void {
       tipo TEXT NOT NULL,
       participantes_json TEXT NOT NULL DEFAULT '[]',
       linked_person_ids_json TEXT NOT NULL DEFAULT '[]',
+      linked_project_ids_json TEXT NOT NULL DEFAULT '[]',
+      speaker_map_json TEXT NOT NULL DEFAULT '[]',
+      primary_person_id TEXT,
+      primary_project_id TEXT,
+      human_weight INTEGER,
       vault_path TEXT,
       status TEXT NOT NULL DEFAULT 'parsed',
       created_at TEXT NOT NULL,
@@ -478,7 +513,12 @@ function migrate(database: DatabaseSync): void {
       estado TEXT NOT NULL DEFAULT 'pendiente',
       entry_id TEXT,
       quantomo_id TEXT,
-      summary_json TEXT NOT NULL DEFAULT '{}'
+      summary_json TEXT NOT NULL DEFAULT '{}',
+      linked_person_ids_json TEXT NOT NULL DEFAULT '[]',
+      linked_project_ids_json TEXT NOT NULL DEFAULT '[]',
+      linked_entities_json TEXT NOT NULL DEFAULT '[]',
+      human_weight INTEGER,
+      entities_reviewed INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE INDEX IF NOT EXISTS idx_chat_blocks_session
@@ -515,6 +555,7 @@ function migrate(database: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS sentinel_agents (
       id TEXT PRIMARY KEY,
       code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL,
       profile_md TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
@@ -803,6 +844,13 @@ function migrate(database: DatabaseSync): void {
       status TEXT NOT NULL DEFAULT 'active',
       source TEXT NOT NULL DEFAULT 'manual',
       merged_into TEXT,
+      parent_id TEXT,
+      admin_type TEXT,
+      admin_code TEXT,
+      capital_name TEXT,
+      iso_country TEXT,
+      human_weight INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -919,7 +967,60 @@ function migrate(database: DatabaseSync): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_app_runs_status ON app_runs(status);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `)
+  ensureColumn(
+    database,
+    'chat_sessions',
+    'linked_project_ids_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(
+    database,
+    'chat_sessions',
+    'speaker_map_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(database, 'chat_sessions', 'primary_person_id', 'TEXT')
+  ensureColumn(database, 'chat_sessions', 'primary_project_id', 'TEXT')
+  ensureColumn(database, 'chat_sessions', 'human_weight', 'INTEGER')
+  ensureColumn(
+    database,
+    'chat_blocks',
+    'linked_person_ids_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(
+    database,
+    'chat_blocks',
+    'linked_project_ids_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(
+    database,
+    'chat_blocks',
+    'linked_entities_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(database, 'chat_blocks', 'human_weight', 'INTEGER')
+  ensureColumn(database, 'chat_blocks', 'notes', `TEXT NOT NULL DEFAULT ''`)
+  ensureColumn(
+    database,
+    'chat_blocks',
+    'links_json',
+    `TEXT NOT NULL DEFAULT '[]'`,
+  )
+  ensureColumn(
+    database,
+    'chat_blocks',
+    'entities_reviewed',
+    'INTEGER NOT NULL DEFAULT 0',
+  )
   ensureColumn(database, 'depro_ida_items', 'matrix_id', 'TEXT')
   ensureColumn(database, 'depro_ida_items', 'row_item_id', 'TEXT')
   ensureColumn(database, 'depro_ida_items', 'col_item_id', 'TEXT')
@@ -945,6 +1046,32 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'depro_research_findings', 'axis_index', 'INTEGER')
   ensureColumn(database, 'depro_research_findings', 'node_index', 'INTEGER')
   ensureColumn(database, 'depro_research_findings', 'axis_title', 'TEXT')
+  ensureColumn(database, 'depro_research_packs', 'is_stub', 'INTEGER NOT NULL DEFAULT 0')
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS app_jobs (
+      id TEXT PRIMARY KEY,
+      family TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL,
+      owner TEXT,
+      generation INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      run_after TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_app_jobs_family_status
+      ON app_jobs(family, status, run_after);
+    CREATE TABLE IF NOT EXISTS embedding_neighbors (
+      object_type TEXT NOT NULL,
+      object_id TEXT NOT NULL,
+      neighbor_id TEXT NOT NULL,
+      similarity REAL NOT NULL,
+      PRIMARY KEY (object_type, object_id, neighbor_id)
+    );
+  `)
   // Índice después de ensureColumn: DBs viejas no tenían matrix_id en CREATE TABLE.
   database.exec(`
     CREATE INDEX IF NOT EXISTS idx_depro_ida_cell
@@ -980,9 +1107,23 @@ function migrate(database: DatabaseSync): void {
   ensureColumn(database, 'dialogo_threads', 'closed_at', 'TEXT')
   ensureColumn(database, 'dialogo_threads', 'hermetic_weight', 'INTEGER')
   ensureColumn(database, 'dialogo_threads', 'entry_id', 'TEXT')
+  ensureColumn(database, 'sentinel_agents', 'name', `TEXT NOT NULL DEFAULT ''`)
+  database.exec(
+    `UPDATE sentinel_agents SET name = code WHERE name IS NULL OR name = ''`,
+  )
   migratePersonKinds(database)
   scrubBookmarkAuthorEntities(database)
   refinePendingPersonKinds(database)
+  ensureColumn(database, 'geografia', 'parent_id', 'TEXT')
+  ensureColumn(database, 'geografia', 'admin_type', 'TEXT')
+  ensureColumn(database, 'geografia', 'admin_code', 'TEXT')
+  ensureColumn(database, 'geografia', 'capital_name', 'TEXT')
+  ensureColumn(database, 'geografia', 'iso_country', 'TEXT')
+  ensureColumn(database, 'geografia', 'human_weight', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(database, 'geografia', 'sort_order', 'INTEGER NOT NULL DEFAULT 0')
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_geografia_parent ON geografia(parent_id)`,
+  )
   migratePersonGeografiaToTable(database)
   migrateProjectKinds(database)
   ensureEntityAliasIndex(database)
@@ -992,6 +1133,7 @@ function migrate(database: DatabaseSync): void {
   backfillProjectAliases(database)
   ensureSearchFts(database)
   backfillCurrentRun(database)
+  seedAppSettings(database)
 }
 
 function ensureQuantomoLattices(database: DatabaseSync): void {
@@ -1109,6 +1251,12 @@ function ensureColumn(
   column: string,
   ddl: string,
 ): void {
+  const exists = database
+    .prepare(
+      `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?`,
+    )
+    .get(table) as { ok: number } | undefined
+  if (!exists) return
   const cols = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{
     name: string
   }>
@@ -2123,6 +2271,97 @@ function backfillSearchFts(database: DatabaseSync): void {
   }
 }
 
+const APP_SETTINGS_DEFAULTS: Record<string, string> = {
+  'provider.llm_main': 'openrouter',
+  'provider.llm_fast': 'groq',
+  'provider.llm_sentinel': 'groq',
+  'provider.llm_vision': 'openrouter',
+  'provider.embed': 'cohere',
+  'provider.rerank': 'cohere',
+  'provider.stt': 'deepgram',
+  'provider.research': 'perplexity',
+  'model.llm_main': 'stealth/ox-alpha',
+  'model.llm_fast': 'openai/gpt-oss-120b',
+  'model.llm_sentinel': 'openai/gpt-oss-20b',
+  'model.llm_vision': 'stealth/ox-alpha',
+  'model.embed': 'embed-v4.0',
+  'model.rerank': 'rerank-v3.5',
+  'model.stt': 'nova-3',
+  'model.research': 'sonar-pro',
+}
+
+function seedAppSettings(database: DatabaseSync): void {
+  const now = new Date().toISOString()
+  const insert = database.prepare(
+    `INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)`,
+  )
+  for (const [key, value] of Object.entries(APP_SETTINGS_DEFAULTS)) {
+    insert.run(key, value, now)
+  }
+  migrateGroqFastDefault(database, now)
+  migrateLlmMainOffCohere(database, now)
+}
+
+/** Una sola vez: ENR/extracts pasan a Groq (v0.7). */
+function migrateGroqFastDefault(database: DatabaseSync, now: string): void {
+  const flag = 'migration.groq_fast_v07'
+  const done = database
+    .prepare(`SELECT value FROM app_settings WHERE key = ?`)
+    .get(flag) as { value: string } | undefined
+  const upsert = database.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  )
+  if (!done) {
+    upsert.run('provider.llm_fast', 'groq', now)
+    upsert.run('model.llm_fast', 'openai/gpt-oss-120b', now)
+    upsert.run(flag, '1', now)
+    console.log('[db] llm_fast → Groq GPT-OSS 120B (ENR v0.7)')
+  }
+
+  const current = database
+    .prepare(`SELECT value FROM app_settings WHERE key = ?`)
+    .get('model.llm_fast') as { value: string } | undefined
+  const retired = new Set([
+    'llama3-70b-8192',
+    'llama3-8b-8192',
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+  ])
+  if (current && retired.has(current.value)) {
+    const next =
+      current.value.includes('8b') || current.value.includes('8B')
+        ? 'openai/gpt-oss-20b'
+        : 'openai/gpt-oss-120b'
+    upsert.run('model.llm_fast', next, now)
+    console.log(`[db] modelo Groq retirado ${current.value} → ${next}`)
+  }
+}
+
+/** Si el cerebro principal quedó en Cohere sin créditos, pasa a Groq. */
+function migrateLlmMainOffCohere(database: DatabaseSync, now: string): void {
+  const flag = 'migration.llm_main_off_cohere_v07'
+  const done = database
+    .prepare(`SELECT value FROM app_settings WHERE key = ?`)
+    .get(flag) as { value: string } | undefined
+  if (done) return
+  const upsert = database.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  )
+  const main = database
+    .prepare(`SELECT value FROM app_settings WHERE key = ?`)
+    .get('provider.llm_main') as { value: string } | undefined
+  if (main?.value === 'cohere') {
+    upsert.run('provider.llm_main', 'groq', now)
+    upsert.run('model.llm_main', 'openai/gpt-oss-20b', now)
+    console.log('[db] llm_main Cohere → Groq GPT-OSS 20B (key Cohere se conserva)')
+  }
+  upsert.run(flag, '1', now)
+}
+
 function seed(database: DatabaseSync): void {
   const now = new Date().toISOString()
   const existing = database
@@ -2147,6 +2386,7 @@ function seed(database: DatabaseSync): void {
       .run(now)
   }
 
+  seedAppSettings(database)
   seedAmazona(database)
   seedMap(database)
   seedDominios(database)

@@ -74,6 +74,11 @@ export async function putMeta(meta: CofreIdbMeta): Promise<void> {
 }
 
 export async function getAllChunks(): Promise<Blob[]> {
+  const rows = await getChunkRows()
+  return rows.map((r) => r.blob)
+}
+
+export async function getChunkRows(): Promise<Array<{ seq: number; blob: Blob }>> {
   const db = await openDb()
   try {
     const tx = db.transaction(CHUNKS, 'readonly')
@@ -81,9 +86,20 @@ export async function getAllChunks(): Promise<Blob[]> {
       tx.objectStore(CHUNKS).getAll() as IDBRequest<Array<{ seq: number; blob: Blob }>>,
     )
     rows.sort((a, b) => a.seq - b.seq)
-    return rows.map((r) => r.blob)
+    return rows
   } finally {
     db.close()
+  }
+}
+
+export function assertContiguousChunks(
+  rows: Array<{ seq: number; blob: Blob }>,
+): void {
+  if (rows.length === 0) throw new Error('No hay chunks')
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i]!.seq !== i) {
+      throw new Error(`Chunks no contiguos: falta seq ${i}`)
+    }
   }
 }
 

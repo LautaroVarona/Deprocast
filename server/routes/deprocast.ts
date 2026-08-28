@@ -39,6 +39,7 @@ import {
   startResearchRun,
 } from '../services/research.js'
 import type { DeproPowerStatus } from '../types.js'
+import { AppError } from '../errors.js'
 
 export const deprocastRouter = Router()
 
@@ -144,8 +145,9 @@ deprocastRouter.post('/research/run', (req, res) => {
     res.status(201).json({ ok: true, pack })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'No se pudo investigar'
+    const status = err instanceof AppError ? err.status : 400
     console.error('[deprocast/research/run]', err)
-    res.status(400).json({ error: message })
+    res.status(status).json({ error: message })
   }
 })
 

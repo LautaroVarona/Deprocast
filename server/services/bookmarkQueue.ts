@@ -9,6 +9,7 @@ import {
   listProcessableBookmarkIds,
   processOneBookmark,
 } from './bookmarkProcess.js'
+import { waitWhile } from './wait.js'
 
 export type BookmarkQueueItemResult = {
   id: string
@@ -125,6 +126,10 @@ export function stopBookmarkProcess(): BookmarkQueueStatus {
   stopRequested = true
   queue = []
   return snapshot()
+}
+
+export async function waitBookmarkIdle(ms: number): Promise<void> {
+  await waitWhile(() => running, ms)
 }
 
 async function drain(): Promise<void> {

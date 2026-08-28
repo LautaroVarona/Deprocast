@@ -15,6 +15,9 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** Un 402 de billing pausa embeds el resto del proceso (evita spam en logs). */
+let embedPausedReason: string | null = null
+
 export function hashText(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
@@ -106,9 +109,19 @@ async function embedTexts(
   texts: string[],
   inputType: 'search_document' | 'search_query',
 ): Promise<{ model: string; vectors: number[][] } | null> {
+  const { resolveSlot } = await import('./appSettings.js')
+  const slot = resolveSlot('embed')
+  if (slot.provider !== 'cohere') {
+    console.error(
+      `[mnemosyne] provider.embed=${slot.provider} no soportado (solo cohere)`,
+    )
+    return null
+  }
+
   const apiKey = env('COHERE_API_KEY')
-  const model = env('COHERE_EMBED_MODEL', 'embed-v4.0')
+  const model = slot.model || env('COHERE_EMBED_MODEL', 'embed-v4.0')
   if (!apiKey || texts.length === 0) return null
+  if (embedPausedReason) return null
 
   // Delay solo para indexación/batch — nunca en search_query (typeahead/Ir).
   if (inputType === 'search_document') {
@@ -134,6 +147,12 @@ async function embedTexts(
 
     if (!res.ok) {
       const errText = await res.text()
+      if (res.status === 402) {
+        embedPausedReason =
+          'Cohere billing agotado (402). Embeds pausados hasta reiniciar el server.'
+        console.warn(`[mnemosyne] ${embedPausedReason}`)
+        return null
+      }
       console.error('[mnemosyne] embed API error:', res.status, errText)
       return null
     }
@@ -179,11 +198,15 @@ export async function upsertEmbedding(
     return true
   }
 
+  if (embedPausedReason) return false
+
   const result = await embedTexts([cleaned], 'search_document')
   if (!result || !result.vectors[0]) {
-    console.warn(
-      `[mnemosyne] skip embed ${objectType}/${objectId} (no API key or failure)`,
-    )
+    if (!embedPausedReason) {
+      console.warn(
+        `[mnemosyne] skip embed ${objectType}/${objectId} (no API key or failure)`,
+      )
+    }
     return false
   }
 
@@ -214,6 +237,13 @@ export async function upsertEmbedding(
 
   invalidateVectorCache()
   console.log(`[mnemosyne] embedded ${objectType}/${objectId} (${vector.length}d)`)
+  if (objectType === 'person' || objectType === 'project') {
+    try {
+      refreshEmbeddingNeighbors(objectType)
+    } catch (err) {
+      console.warn('[mnemosyne] neighbors:', err)
+    }
+  }
   return true
 }
 
@@ -354,6 +384,7 @@ export async function embedPerson(personId: string): Promise<void> {
   const text = [
     `Persona: ${p.name}`,
     `Tipo: ${p.kind}`,
+    p.kind === 'ia' ? 'IA: perfil de modelo (no humano)' : '',
     aliases.length ? `Alias: ${aliases.join(', ')}` : '',
     p.notes ?? '',
   ]
@@ -450,6 +481,73 @@ export function similarToStored(
     }))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
+}
+
+export function refreshEmbeddingNeighbors(
+  objectType: 'person' | 'project',
+  topK = 4,
+  minSim = 0.42,
+): void {
+  const db = getDb()
+  const model = env('COHERE_EMBED_MODEL', 'embed-v4.0')
+  const emb = rows<{ object_id: string; vector: string }>(
+    db
+      .prepare(
+        `SELECT object_id, vector FROM embeddings WHERE model = ? AND object_type = ?`,
+      )
+      .all(model, objectType),
+  )
+  const parsed: Array<{ id: string; v: number[] }> = []
+  for (const r of emb) {
+    try {
+      const v = JSON.parse(r.vector) as number[]
+      if (Array.isArray(v) && v.length > 0) parsed.push({ id: r.object_id, v })
+    } catch {
+      /* ignore */
+    }
+  }
+  db.exec('BEGIN')
+  try {
+    db.prepare(`DELETE FROM embedding_neighbors WHERE object_type = ?`).run(
+      objectType,
+    )
+    const ins = db.prepare(
+      `INSERT INTO embedding_neighbors (object_type, object_id, neighbor_id, similarity)
+       VALUES (?, ?, ?, ?)`,
+    )
+    for (let i = 0; i < parsed.length; i++) {
+      const a = parsed[i]!
+      const scored: Array<{ id: string; sim: number }> = []
+      for (let j = 0; j < parsed.length; j++) {
+        if (i === j) continue
+        const b = parsed[j]!
+        const sim = cosineSimilarity(a.v, b.v)
+        if (sim >= minSim) scored.push({ id: b.id, sim })
+      }
+      scored.sort((x, y) => y.sim - x.sim)
+      for (const hit of scored.slice(0, topK)) {
+        ins.run(objectType, a.id, hit.id, hit.sim)
+      }
+    }
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+}
+
+export function loadEmbeddingNeighbors(): Array<{
+  object_id: string
+  neighbor_id: string
+  similarity: number
+}> {
+  return rows<{ object_id: string; neighbor_id: string; similarity: number }>(
+    getDb()
+      .prepare(
+        `SELECT object_id, neighbor_id, similarity FROM embedding_neighbors`,
+      )
+      .all(),
+  )
 }
 
 export async function embedIdaItem(id: string): Promise<void> {

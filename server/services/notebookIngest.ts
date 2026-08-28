@@ -96,7 +96,7 @@ async function rasterizePdfToPngs(
     data,
     useSystemFonts: true,
     canvasFactory,
-  }).promise
+  } as Parameters<typeof pdfjs.getDocument>[0]).promise
 
   const n = Math.min(doc.numPages, maxPages)
   const paths: string[] = []
@@ -110,7 +110,7 @@ async function rasterizePdfToPngs(
     )
     await page.render({
       canvasContext: canvasAndContext.context as unknown as CanvasRenderingContext2D,
-      canvas: canvasAndContext.canvas,
+      canvas: canvasAndContext.canvas as unknown as HTMLCanvasElement,
       viewport,
     }).promise
 

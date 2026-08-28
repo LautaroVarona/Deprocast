@@ -1,8 +1,13 @@
 node_modules/
 dist/
 dist-extension/
+dist-extension.zip
 data/
 vault/
+vault.staging/
+vault.prev/
+feedback.staging/
+feedback.prev/
 tools/*.exe
 tools/yt-dlp
 tools/ffmpeg*
@@ -17,3 +22,10 @@ tools/ffplay*
 .env
 x-bookmarks-raw-*.csv
 feedback/
+data/local-token
+ig_export.json
+**/ig_export.json
+Chat de WhatsApp*.txt
+*WhatsApp*.txt
+*whatsapp*.txt
+**/Chat de WhatsApp*.txt

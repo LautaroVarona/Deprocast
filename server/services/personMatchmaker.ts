@@ -54,7 +54,7 @@ export function listMasterProfiles(db: DatabaseSync): Person[] {
          WHERE source = 'manual'
            AND (status IS NULL OR status = 'active')
            AND (merged_into IS NULL OR merged_into = '')
-           AND kind IN ('fisica','juridica','ficticia','agrupacion')
+           AND kind IN ('fisica','juridica','ficticia','ia','agrupacion')
          ORDER BY name COLLATE NOCASE ASC`,
       )
       .all(),

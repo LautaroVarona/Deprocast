@@ -13,7 +13,8 @@ import {
   type SwToPopup,
   type TabEvent,
 } from './protocol'
-import { clearCaptureStore, getAllChunks, getMeta } from './chunkStore'
+import { clearCaptureStore, getChunkRows, assertContiguousChunks, getMeta } from './chunkStore'
+import { authFetch } from './auth'
 
 const STATE_KEY = 'cofreState'
 const TIMELINE_KEY = 'cofreTimeline'
@@ -22,6 +23,19 @@ const OPEN_TAB_KEY = 'cofreOpenTab'
 let offscreenPort: chrome.Port | null = null
 let waitingForPort: ((port: chrome.Port) => void) | null = null
 let tabListenersOn = false
+
+function sanitizeTabUrl(raw: string): string {
+  try {
+    const u = new URL(raw)
+    u.username = ''
+    u.password = ''
+    u.hash = ''
+    u.search = ''
+    return u.toString()
+  } catch {
+    return raw.split('#')[0]?.split('?')[0] ?? raw
+  }
+}
 
 async function readState(): Promise<CofreState> {
   const bag = await chrome.storage.session.get(STATE_KEY)
@@ -128,7 +142,7 @@ async function appendTabEvent(
 
   const nextOpen: TabEvent = {
     at: now,
-    url,
+    url: sanitizeTabUrl(url),
     title: clippedTitle,
     tabId,
   }
@@ -278,10 +292,12 @@ async function handleStart(
 
 async function uploadPending(): Promise<SwToPopup> {
   const meta = await getMeta()
-  const chunks = await getAllChunks()
-  if (!meta || chunks.length === 0) {
+  const rows = await getChunkRows()
+  if (!meta || rows.length === 0) {
     throw new Error('No hay captura pendiente para enviar')
   }
+  assertContiguousChunks(rows)
+  const chunks = rows.map((r) => r.blob)
 
   await writeState({ status: 'uploading', error: null })
   const timeline = await closeOpenTab()
@@ -302,7 +318,7 @@ async function uploadPending(): Promise<SwToPopup> {
   form.append('audio', blob, `cofre-${stamp}.webm`)
   form.append('manifest', JSON.stringify(manifest))
 
-  const res = await fetch(`${SERVER_ORIGIN}/api/ingest/cofre`, {
+  const res = await authFetch(`${SERVER_ORIGIN}/api/ingest/cofre`, {
     method: 'POST',
     body: form,
   })

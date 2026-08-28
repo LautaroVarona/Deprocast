@@ -254,6 +254,18 @@ export const MODULE_CATALOG: DeproModule[] = [
     suggestedAgentIds: ['omnivoro-nucleo'],
   },
   {
+    id: 'configuracion',
+    label: 'Configuración',
+    does: 'Selectores de proveedor/modelo por rol (LLM, STT, embed…). Keys en .env.',
+    files: 'ConfiguracionSection, appSettings.ts, llmChat.ts',
+    ipo: {
+      input: 'Elección de proveedor.',
+      processing: 'Persistir app_settings + router LLM.',
+      output: 'Runtime multi-proveedor.',
+    },
+    suggestedAgentIds: ['omnivoro-nucleo'],
+  },
+  {
     id: 'feedback',
     label: 'Feedback',
     does: 'Captura de bugs/UX con contexto de vista.',

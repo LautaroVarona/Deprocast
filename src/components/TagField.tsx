@@ -17,6 +17,7 @@ type Props = {
   onChange: (next: { tags: BookmarkManualTag[]; note: string }) => void
   placeholder?: string
   disabled?: boolean
+  showChips?: boolean
 }
 
 function mentionQueryAt(
@@ -39,6 +40,7 @@ export function TagField({
   onChange,
   placeholder = '@ etiquetá perfiles, proyectos o dominios. Texto libre opcional.',
   disabled,
+  showChips = true,
 }: Props) {
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionHits, setMentionHits] = useState<MentionMenuHit[]>([])
@@ -90,7 +92,7 @@ export function TagField({
       void (async () => {
         try {
           const res = await api.typeaheadEntities(query, {
-            kinds: ['person', 'project', 'dominio'],
+            kinds: ['person', 'project', 'dominio', 'agrupacion', 'geografia'],
             limit: 10,
             scope: 'masters',
             signal: ac.signal,
@@ -101,7 +103,9 @@ export function TagField({
               (h): h is typeof h & { kind: BookmarkManualTag['kind'] } =>
                 h.kind === 'person' ||
                 h.kind === 'project' ||
-                h.kind === 'dominio',
+                h.kind === 'dominio' ||
+                h.kind === 'agrupacion' ||
+                h.kind === 'geografia',
             )
             .map((h) => ({
               kind: h.kind,
@@ -237,7 +241,7 @@ export function TagField({
         onHoverIdx={setMentionIdx}
         onPick={applyMention}
       />
-      {tags.length > 0 && (
+      {showChips && tags.length > 0 && (
         <ul className="criba-note-tags">
           {tags.map((tag) => (
             <li key={`${tag.kind}:${tag.entity_id}`}>

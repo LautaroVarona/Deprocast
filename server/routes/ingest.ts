@@ -4,11 +4,18 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { getDb, getTrincheraNotebookId } from '../db.js'
+import { rows } from '../sql.js'
 import { resolveOriginAttribution } from '../services/originAttribution.js'
 import { ingestBlob } from '../services/blobIngest.js'
 import { ingestCofre } from '../services/cofreIngest.js'
+import { processTranscripts } from '../controllers/ingestController.js'
+import {
+  decodeMulterOriginalName,
+  ingestFileKey,
+} from '../services/ingestBatch.js'
+import { resolveContained, VAULT_DIR } from '../services/paths.js'
 
-const VAULT_ROOT = path.resolve(process.cwd(), 'vault')
+const VAULT_ROOT = VAULT_DIR
 const INCOMING = path.join(VAULT_ROOT, '_incoming')
 
 fs.mkdirSync(INCOMING, { recursive: true })
@@ -62,6 +69,23 @@ function parseBatchTags(raw: unknown): string {
   }
 }
 
+type ExistingBatchRow = CreatedEntry & {
+  original_filename: string | null
+  vault_path: string | null
+}
+
+function vaultFileSize(vaultPath: string | null): number | null {
+  if (!vaultPath) return null
+  try {
+    const abs = path.isAbsolute(vaultPath)
+      ? vaultPath
+      : path.resolve(process.cwd(), vaultPath)
+    return fs.statSync(abs).size
+  } catch {
+    return null
+  }
+}
+
 function ingestDiskFile(
   file: Express.Multer.File,
   now: Date,
@@ -71,15 +95,14 @@ function ingestDiskFile(
   const notebookId = getTrincheraNotebookId()
   const entryId = randomUUID()
 
-  const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8')
+  const originalName = decodeMulterOriginalName(file.originalname)
   const title = originalName.replace(/\.[^.]+$/, '')
   const safeName = path.basename(originalName).replace(/[<>:"|?*]/g, '_')
 
-  const dir = path.join(VAULT_ROOT, entryId)
+  const dir = resolveContained(VAULT_ROOT, entryId)
   fs.mkdirSync(dir, { recursive: true })
   const absVault = path.join(dir, safeName)
 
-  // Mover desde _incoming al vault definitivo
   fs.renameSync(file.path, absVault)
 
   const vaultPath = path
@@ -127,6 +150,17 @@ function ingestDiskFile(
   }
 }
 
+function cleanupTemps(files: Express.Multer.File[] | undefined): void {
+  if (!files) return
+  for (const file of files) {
+    try {
+      if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 ingestRouter.post('/audio', (req, res) => {
   upload.array('files', 16)(req, res, (err: unknown) => {
     if (err) {
@@ -143,8 +177,8 @@ ingestRouter.post('/audio', (req, res) => {
       return
     }
 
+    const files = req.files as Express.Multer.File[] | undefined
     try {
-      const files = req.files as Express.Multer.File[] | undefined
       if (!files || files.length === 0) {
         res.status(400).json({ error: 'No se recibieron archivos' })
         return
@@ -159,38 +193,113 @@ ingestRouter.post('/audio', (req, res) => {
         typeof body.batch_id === 'string' && body.batch_id.trim()
           ? body.batch_id.trim()
           : randomUUID()
+      const db = getDb()
+      const existing = rows<ExistingBatchRow>(
+        db
+          .prepare(
+            `SELECT id, title, title_manual, timestamp_exact, status,
+                    original_filename, vault_path
+             FROM entries WHERE batch_id = ?`,
+          )
+          .all(batchId),
+      )
+      const byKey = new Map<string, CreatedEntry>()
+      for (const e of existing) {
+        const name = e.original_filename
+        const size = vaultFileSize(e.vault_path)
+        if (!name || size == null) continue
+        byKey.set(ingestFileKey({ name, size }), {
+          id: e.id,
+          title: e.title,
+          title_manual: e.title_manual,
+          timestamp_exact: e.timestamp_exact,
+          origin_source: 'batch',
+          status: e.status,
+        })
+      }
+      const incoming = files.map((file) => ({
+        name: decodeMulterOriginalName(file.originalname),
+        size: file.size,
+        file,
+      }))
+
       const manualTags = parseBatchTags(body.manual_tags)
       const operatorNote =
         typeof body.operator_note === 'string' ? body.operator_note : ''
 
       const now = new Date()
       const created: CreatedEntry[] = []
-
-      for (const file of files) {
-        try {
-          created.push(
-            ingestDiskFile(file, now, {
+      const reused: CreatedEntry[] = []
+      const errors: Array<{ file: string; error: string }> = []
+      db.exec('BEGIN')
+      try {
+        for (const item of incoming) {
+          const key = ingestFileKey({ name: item.name, size: item.size })
+          const prev = byKey.get(key)
+          if (prev) {
+            console.log(
+              `[ingest] «${item.name}» ya en lote ${batchId.slice(0, 8)} → ${prev.id} (idempotente)`,
+            )
+            reused.push(prev)
+            continue
+          }
+          try {
+            const entry = ingestDiskFile(item.file, now, {
               batchId,
               manualTags,
               operatorNote,
-            }),
-          )
-        } catch (fileErr) {
-          console.error('[ingest] file failed:', file.originalname, fileErr)
-          // limpiar temp si quedó
-          try {
-            if (file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path)
-          } catch {
-            /* ignore */
+            })
+            created.push(entry)
+            byKey.set(key, entry)
+          } catch (fileErr) {
+            errors.push({
+              file: item.name,
+              error:
+                fileErr instanceof Error ? fileErr.message : String(fileErr),
+            })
           }
-          throw fileErr
         }
+        if (created.length === 0 && reused.length === 0 && errors.length > 0) {
+          db.exec('ROLLBACK')
+          res.status(400).json({ error: 'Ningún archivo se pudo ingerir', errors })
+          return
+        }
+        db.exec('COMMIT')
+      } catch (txErr) {
+        try {
+          db.exec('ROLLBACK')
+        } catch {
+          /* ignore */
+        }
+        throw txErr
       }
 
-      res.json({ ok: true, entries: created })
+      const entries = [...created, ...reused]
+      if (created.length > 0 || reused.length > 0) {
+        console.log(
+          `[ingest] lote ${batchId.slice(0, 8)}: +${created.length} nuevo(s)` +
+            (reused.length > 0 ? `, ${reused.length} ya existía(n)` : ''),
+        )
+      }
+      if (errors.length > 0) {
+        res.status(207).json({
+          ok: true,
+          entries,
+          errors,
+          idempotent: created.length === 0,
+        })
+        return
+      }
+      res.json({
+        ok: true,
+        entries,
+        idempotent: created.length === 0 && reused.length > 0,
+      })
     } catch (e) {
       console.error('[ingest]', e)
       res.status(500).json({ error: 'Error al ingerir audio' })
+    } finally {
+      cleanupTemps(files)
     }
   })
 })
@@ -274,6 +383,48 @@ ingestRouter.post('/blob', (req, res) => {
   } catch (e) {
     console.error('[ingest] blob:', e)
     const message = e instanceof Error ? e.message : 'Error al guardar la nota'
+    res.status(500).json({ error: message })
+  }
+})
+
+ingestRouter.post('/cognitive', async (req, res) => {
+  const body = req.body as {
+    transcripts?: unknown
+    title?: unknown
+  }
+  const raw = body.transcripts
+  if (!Array.isArray(raw) || raw.length === 0) {
+    res.status(400).json({ error: 'transcripts[] requerido' })
+    return
+  }
+  const transcripts = raw.map((item, index) => {
+    if (typeof item === 'string') {
+      return {
+        title:
+          typeof body.title === 'string' && index === 0
+            ? body.title
+            : `Nota ${index + 1}`,
+        transcript: item,
+      }
+    }
+    if (item && typeof item === 'object') {
+      const o = item as { id?: unknown; title?: unknown; transcript?: unknown }
+      return {
+        id: typeof o.id === 'string' ? o.id : undefined,
+        title: typeof o.title === 'string' ? o.title : `Nota ${index + 1}`,
+        transcript: String(o.transcript ?? ''),
+      }
+    }
+    return { title: `Nota ${index + 1}`, transcript: String(item ?? '') }
+  })
+
+  try {
+    const items = await processTranscripts(transcripts)
+    res.json({ ok: true, status: 'pending_review', items })
+  } catch (e) {
+    console.error('[ingest/cognitive]', e)
+    const message =
+      e instanceof Error ? e.message : 'Error en el motor cognitivo'
     res.status(500).json({ error: message })
   }
 })

@@ -60,13 +60,22 @@ function describeResult(result: BackupApplyResult): string {
   const media = result.media
     ? `${result.media.copied} archivos de media copiados, ${result.media.skipped} ya estaban`
     : 'sin media'
+  const mediaFlag =
+    result.mediaStatus === 'failed'
+      ? ' · MEDIA FALLÓ (metadatos sí se aplicaron)'
+      : result.mediaStatus === 'partial'
+        ? ' · media parcial (colisiones de hash)'
+        : ''
   const tri = result.remapped?.trinchera
     ? ` · Trinchera remapeada`
     : ''
+  const profiles = result.profiles
+    ? ` · ${result.profiles.persons_merged} personas y ${result.profiles.projects_merged} proyectos fusionados por nombre/alias`
+    : ''
   if (result.mode === 'merge') {
-    return `Fusionado: ${inserted} filas nuevas, ${skipped} ya existían, ${media}${tri}.`
+    return `Fusionado: ${inserted} filas nuevas, ${skipped} ya existían, ${media}${mediaFlag}${tri}${profiles}.`
   }
-  return `Universo reemplazado: ${inserted} filas, ${media}${tri}.`
+  return `Universo reemplazado: ${inserted} filas, ${media}${mediaFlag}${tri}.`
 }
 
 export function RespaldoSection({ refreshKey, run }: Props) {
@@ -120,6 +129,12 @@ export function RespaldoSection({ refreshKey, run }: Props) {
   async function handleMerge() {
     if (!mergeFile) return
     if (mergeConfirm !== 'FUSIONAR') return
+    if (mergeFile.size < 22) {
+      setError(
+        `El archivo está vacío o incompleto (${mergeFile.name}, ${formatBytes(mergeFile.size)}). Esperá a que termine de copiarse o usá el JSON de Respaldo.`,
+      )
+      return
+    }
     setMerging(true)
     setError(null)
     setStatus(null)
@@ -176,7 +191,11 @@ export function RespaldoSection({ refreshKey, run }: Props) {
   const vaultBytes = (summary?.vault_bytes ?? 0) + (summary?.feedback_bytes ?? 0)
   const vaultFiles = (summary?.vault_files ?? 0) + (summary?.feedback_files ?? 0)
   const zipHeavy = vaultBytes > 200 * 1024 * 1024
-  const canMerge = Boolean(mergeFile) && mergeConfirm === 'FUSIONAR' && !merging
+  const canMerge =
+    mergeFile != null &&
+    mergeFile.size >= 22 &&
+    mergeConfirm === 'FUSIONAR' &&
+    !merging
   const canRestore =
     Boolean(replaceFile) && replaceConfirm === 'REEMPLAZAR' && !restoring
   const canDestroy =
@@ -287,16 +306,21 @@ export function RespaldoSection({ refreshKey, run }: Props) {
       <div className="respaldo-block respaldo-merge">
         <h3>Fusionar (sumar a este universo)</h3>
         <p className="muted">
-          JSON o ZIP de Deprocast. Inserta filas que no existen. No pisa IDA,
-          AmazonA ni la RUN de esta máquina. Escribí FUSIONAR. Usalo para
-          traer trabajo de otra notebook a la oficina.
+          JSON de Respaldo (preferible si el ZIP es enorme o se corta al
+          copiar). El ZIP suma media que aún no esté. Fusiona perfiles por
+          nombre/alias. No pisa IDA, AmazonA ni la RUN. Escribí FUSIONAR.
         </p>
         <input
           type="file"
           accept=".json,.zip,application/json,application/zip"
           onChange={(e) => setMergeFile(e.target.files?.[0] ?? null)}
         />
-        {mergeFile && <p className="mono muted">{mergeFile.name}</p>}
+        {mergeFile && (
+          <p className="mono muted">
+            {mergeFile.name} · {formatBytes(mergeFile.size)}
+            {mergeFile.size < 22 ? ' — vacío o incompleto' : ''}
+          </p>
+        )}
         <input
           className="respaldo-confirm"
           type="text"

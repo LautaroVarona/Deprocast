@@ -1,6 +1,7 @@
 import type { Server, IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket as WsClient, type RawData } from 'ws'
+import { isAllowedOrigin, tokenMatches } from './services/localAuth.js'
 
 function env(key: string, fallback = ''): string {
   return process.env[key]?.replace(/^["']|["']$/g, '') ?? fallback
@@ -33,13 +34,19 @@ type QueuedFrame = { data: RawData; isBinary: boolean }
  * Proxy browser ↔ Deepgram Live.
  * Usa DEEPGRAM_API_KEY en el server (no requiere auth/grant / Member).
  */
-export function attachLiveWsProxy(server: Server): void {
+export function attachLiveWsProxy(
+  server: Server,
+  _getToken: () => string,
+): () => void {
   const wss = new WebSocketServer({ noServer: true })
 
-  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+  const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     let pathname = ''
+    let search: URLSearchParams
     try {
-      pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname
+      const u = new URL(req.url ?? '/', 'http://127.0.0.1')
+      pathname = u.pathname
+      search = u.searchParams
     } catch {
       socket.destroy()
       return
@@ -50,10 +57,30 @@ export function attachLiveWsProxy(server: Server): void {
       return
     }
 
+    const origin = req.headers.origin
+    if (origin && !isAllowedOrigin(origin)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    const qToken = search.get('token') || ''
+    const headerToken =
+      String(req.headers['x-deprocast-token'] ?? '').trim() ||
+      String(req.headers.authorization ?? '')
+        .replace(/^Bearer\s+/i, '')
+        .trim()
+    if (!tokenMatches(qToken || headerToken)) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+
     wss.handleUpgrade(req, socket, head, (client) => {
       wss.emit('connection', client, req)
     })
-  })
+  }
+
+  server.on('upgrade', onUpgrade)
 
   wss.on('connection', (client, req: IncomingMessage) => {
     const apiKey = env('DEEPGRAM_API_KEY')
@@ -181,4 +208,8 @@ export function attachLiveWsProxy(server: Server): void {
   })
 
   console.log('[deprocast] live WS proxy on /api/live/stream')
+  return () => {
+    server.off('upgrade', onUpgrade)
+    wss.close()
+  }
 }

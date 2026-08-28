@@ -37,6 +37,7 @@ import { searchSimilar } from '../services/embeddings.js'
 import { typeaheadEntities } from '../services/typeahead.js'
 import { dismissGraphLinkSuggestion } from '../services/graph.js'
 import { findGeografiaMatch } from '../services/geografia.js'
+import { ensureEntityEntryLink } from '../services/blobIngest.js'
 
 export const personsRouter = Router()
 
@@ -107,14 +108,20 @@ function mergeAliasJson(
 
 personsRouter.get('/', (_req, res) => {
   const db = getDb()
-  const linkCount = db.prepare(
-    `SELECT COUNT(*) as c FROM entity_links WHERE entity_kind = 'person' AND entity_id = ?`,
+  const counts = rows<{ entity_id: string; c: number }>(
+    db
+      .prepare(
+        `SELECT entity_id, COUNT(*) as c FROM entity_links
+         WHERE entity_kind = 'person' GROUP BY entity_id`,
+      )
+      .all(),
   )
+  const countMap = new Map(counts.map((r) => [r.entity_id, r.c]))
 
   const profiles = listMasterProfiles(db).map((p) => ({
     ...p,
     aliases_list: JSON.parse(p.aliases || '[]') as string[],
-    link_count: rowRequired<{ c: number }>(linkCount.get(p.id)).c,
+    link_count: countMap.get(p.id) ?? 0,
   }))
 
   const waiting = buildWaitingWithMatches(db)
@@ -1169,11 +1176,13 @@ personsRouter.post('/proposals/:id/approve', (req, res) => {
          WHERE entry_id = ? AND name = ? AND type IN ('person', 'persona', 'geografia')`,
       ).run(name, proposal.entry_id, originalName)
 
-      const linkId = randomUUID()
-      db.prepare(
-        `INSERT INTO entity_links (id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at)
-         VALUES (?, 'geografia', ?, ?, NULL, 'mentioned', ?)`,
-      ).run(linkId, geoId, proposal.entry_id, now)
+      const linkId = ensureEntityEntryLink({
+        entityKind: 'geografia',
+        entityId: geoId,
+        entryId: proposal.entry_id,
+        role: 'ner',
+        now,
+      })
 
       db.exec('COMMIT')
       res.json({
@@ -1282,11 +1291,13 @@ personsRouter.post('/proposals/:id/approve', (req, res) => {
        WHERE entry_id = ? AND name = ? AND type IN ('person', 'persona')`,
     ).run(name, proposal.entry_id, originalName)
 
-    const linkId = randomUUID()
-    db.prepare(
-      `INSERT INTO entity_links (id, entity_kind, entity_id, entry_id, quantomo_id, role, created_at)
-       VALUES (?, 'person', ?, ?, NULL, 'mentioned', ?)`,
-    ).run(linkId, personId, proposal.entry_id, now)
+    const linkId = ensureEntityEntryLink({
+      entityKind: 'person',
+      entityId: personId,
+      entryId: proposal.entry_id,
+      role: 'ner',
+      now,
+    })
 
     db.exec('COMMIT')
 

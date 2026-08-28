@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { getDb } from '../db.js'
 import { row } from '../sql.js'
 import type { Bookmark } from '../types.js'
+import { validateInstagramDownloadUrl } from './urlSafety.js'
+import { resolveContained } from './paths.js'
 
 const VAULT_IG = path.resolve(process.cwd(), 'vault', 'instagram')
 
@@ -139,16 +141,21 @@ export async function ensureReelMedia(
   bookmark: Pick<Bookmark, 'id' | 'link' | 'local_media_path' | 'source'>,
 ): Promise<EnsureMediaResult> {
   if (bookmark.local_media_path) {
-    const abs = path.resolve(process.cwd(), bookmark.local_media_path)
-    if (fs.existsSync(abs)) {
-      return { ok: true, absPath: abs, relativePath: bookmark.local_media_path }
+    try {
+      const abs = resolveContained(process.cwd(), bookmark.local_media_path)
+      if (fs.existsSync(abs)) {
+        return { ok: true, absPath: abs, relativePath: bookmark.local_media_path }
+      }
+    } catch {
+      /* path hostil */
     }
   }
 
-  const url = (bookmark.link || '').trim()
-  if (!url || !/instagram\.com/i.test(url)) {
-    return { ok: false, error: 'URL de Instagram inválida o vacía' }
+  const parsed = await validateInstagramDownloadUrl(bookmark.link || '')
+  if (!parsed.ok) {
+    return { ok: false, error: parsed.error }
   }
+  const url = parsed.href
 
   const dir = instagramVaultDir(bookmark.id)
   fs.mkdirSync(dir, { recursive: true })
@@ -183,6 +190,7 @@ export async function ensureReelMedia(
         '-o',
         outTpl,
         '--newline',
+        '--no-check-certificates',
         url,
       ],
       { timeoutMs: 180_000 },

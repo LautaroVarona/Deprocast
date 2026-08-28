@@ -14,6 +14,8 @@ import {
   researchWithPerplexity,
   type PerplexityCitation,
 } from './perplexity.js'
+import { waitWhile } from './wait.js'
+import { AppError } from '../errors.js'
 
 const PACK_STATUSES: DeproResearchPackStatus[] = [
   'running',
@@ -24,6 +26,17 @@ const PACK_STATUSES: DeproResearchPackStatus[] = [
 
 const MAX_FINDINGS = 36
 const runningJobs = new Set<string>()
+let researchAborted = false
+
+export function abortResearchJobs(): void {
+  researchAborted = true
+  runningJobs.clear()
+}
+
+export async function waitResearchIdle(ms: number): Promise<void> {
+  await waitWhile(() => runningJobs.size > 0, ms)
+  researchAborted = false
+}
 
 type MatrixNode = {
   title: string
@@ -517,6 +530,10 @@ async function executePackJob(packId: string): Promise<void> {
     const pack = getResearchPack(packId)
     if (!pack || pack.status !== 'running') return
 
+    if (researchAborted) {
+      touchPack(packId, { status: 'error', error_message: 'Cancelado por mantenimiento' })
+      return
+    }
     const result = await researchWithPerplexity({
       topic: pack.topic,
       agentId: pack.agent_id,
@@ -550,6 +567,14 @@ export function startResearchRun(input: {
 }): DeproResearchPack {
   const topic = String(input.topic ?? '').trim()
   if (!topic) throw new Error('Tema requerido')
+  const key = (process.env.PERPLEXITY_API_KEY || '').replace(/^["']|["']$/g, '').trim()
+  if (!key) {
+    throw new AppError(
+      'Perplexity no configurado',
+      503,
+      'CAPABILITY_UNAVAILABLE',
+    )
+  }
   const agentId = String(input.agent_id ?? 'explorador').trim() || 'explorador'
   const promptKey =
     String(input.prompt_key ?? agentId).trim() || agentId
@@ -641,6 +666,9 @@ export function assimilateFinding(
     throw new Error('El hallazgo ya no está pendiente')
   }
   const pack = getResearchPack(finding.pack_id)
+  if (pack && Number((pack as { is_stub?: number }).is_stub) === 1) {
+    throw new Error('No se puede asimilar un resultado stub/mock')
+  }
   const bodyParts = [finding.body.trim()]
   if (finding.axis_title) {
     bodyParts.unshift(`Eje: ${finding.axis_title}`)

@@ -11,19 +11,34 @@ import type {
   DeproIdaCardProposal,
   OcrFrameResult,
 } from '../types.js'
+import { getDb } from '../db.js'
 import { refinePersonKind } from './nerGuards.js'
 import { clampTitleWords } from './titleUtils.js'
+import { canCallLlm, isPayloadTooLargeError, llmChat } from './llmChat.js'
+import { resolveLlmRoute } from './appSettings.js'
+import { listNerLexicon } from './entityMatch.js'
+import {
+  extractDeprocastEntities,
+  groqEntityToCohere,
+  groqToCohereExtraction,
+} from './groqExtractor.js'
+import {
+  cohereAssistantMessage,
+  parseCohereToolCalls,
+} from './providers/cohereChat.js'
 
-function env(key: string, fallback = ''): string {
-  return process.env[key]?.replace(/^["']|["']$/g, '') ?? fallback
-}
+export { cohereAssistantMessage, parseCohereToolCalls }
 
 export function isCohereQuotaError(err: unknown): boolean {
+  if (isPayloadTooLargeError(err)) return false
   const msg = err instanceof Error ? err.message : String(err)
   return (
     /Trial key/i.test(msg) ||
     /1000 API calls/i.test(msg) ||
-    /rate limits/i.test(msg) && /Trial/i.test(msg)
+    (/rate limits/i.test(msg) && /Trial/i.test(msg)) ||
+    /OpenRouter.*(?:429|rate)/i.test(msg) ||
+    /insufficient.?credits/i.test(msg) ||
+    /\b402\b/.test(msg)
   )
 }
 
@@ -92,27 +107,6 @@ async function encodeImageForVision(absPath: string): Promise<{
       height: 0,
     }
   }
-}
-
-function chatTextFromCohere(data: unknown): string {
-  const d = data as {
-    message?: { content?: unknown }
-    text?: string
-  }
-  const content = d.message?.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        if (typeof c === 'string') return c
-        if (c && typeof c === 'object' && 'text' in c) {
-          return String((c as { text?: string }).text ?? '')
-        }
-        return ''
-      })
-      .join('')
-  }
-  return d.text || ''
 }
 
 /** Extrae un campo string aunque el JSON venga truncado o con saltos crudos. */
@@ -264,61 +258,54 @@ export async function extractFromTranscript(
       ? clampExtraction(mockExtraction(transcript, title), opts)
       : empty
 
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) {
-    await delay(delayMs)
+  const route = resolveLlmRoute('fast')
+  if (route.provider === 'groq') {
+    if (!route.apiKey) return fallback()
+    try {
+      let knownEntities: ReturnType<typeof listNerLexicon> = []
+      try {
+        knownEntities = listNerLexicon(getDb())
+      } catch (err) {
+        console.warn('[groq/extractor] léxico ENR no disponible:', err)
+      }
+      const groq = await extractDeprocastEntities(transcript, {
+        model: route.model,
+        knownEntities,
+        slop: opts?.slop,
+        maxQuantomos: opts?.maxQuantomos,
+        speakerContext: opts?.speakerContext,
+        tagsContext: opts?.tagsContext,
+        operatorNote: opts?.operatorNote,
+      })
+      return clampExtraction(groqToCohereExtraction(groq, title), opts)
+    } catch (err) {
+      console.error('[groq/extractor] extractFromTranscript:', err)
+      return empty
+    }
   }
 
-  if (!apiKey) {
+  if (!canCallLlm('fast')) {
     return fallback()
   }
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
-
     const extras: string[] = []
     if (opts?.speakerContext) extras.push(opts.speakerContext)
     if (opts?.tagsContext) extras.push(opts.tagsContext)
     if (opts?.operatorNote) extras.push(`Nota operador:\n${opts.operatorNote}`)
 
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: buildAudioSystemPrompt(opts ?? {}) },
-          {
-            role: 'user',
-            content: `Título actual: ${title}\n${extras.join('\n\n')}\n\nTranscript:\n${transcript}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.2,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: buildAudioSystemPrompt(opts ?? {}) },
+        {
+          role: 'user',
+          content: `Título actual: ${title}\n${extras.join('\n\n')}\n\nTranscript:\n${transcript}`,
+        },
+      ],
     })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere] API error:', res.status, errText)
-      return fallback()
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
 
     const parsed = parseJsonSafe(raw)
     if (parsed) {
@@ -620,60 +607,28 @@ export async function extractFromBookmark(
   text: string,
   meta?: { author?: string; link?: string },
 ): Promise<BookmarkExtraction> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) {
-    await delay(delayMs)
-  }
-
-  if (!apiKey) {
+  if (!canCallLlm('fast')) {
     return mockBookmarkExtraction(text)
   }
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
     const author = meta?.author
       ? `\nAutor del post (metadata; NO extraer como entidad): ${meta.author}`
       : ''
     const link = meta?.link ? `\nLink: ${meta.link}` : ''
 
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: BOOKMARK_SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `Bookmark text:${author}${link}\n\nCuerpo:\n${text}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.2,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: BOOKMARK_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `Bookmark text:${author}${link}\n\nCuerpo:\n${text}`,
+        },
+      ],
     })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/bookmark] API error:', res.status, errText)
-      return mockBookmarkExtraction(text)
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
 
     const parsed = parseJsonSafe(raw) as Partial<BookmarkExtraction> | null
     if (parsed) return normalizeBookmarkExtraction(parsed, text)
@@ -799,18 +754,12 @@ export type InstagramReelExtractInput = {
 export async function extractFromInstagramReel(
   input: InstagramReelExtractInput,
 ): Promise<BookmarkExtraction> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-
   const description = input.description.replace(/\s+/g, ' ').trim()
-  if (!apiKey) {
+  if (!canCallLlm('fast')) {
     return mockInstagramExtraction(description, input)
   }
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
     const author = input.author
       ? `\nAutor del post (metadata; NO extraer como entidad): ${input.author}`
       : ''
@@ -826,41 +775,19 @@ export async function extractFromInstagramReel(
             .slice(0, 8000)}`
         : ''
 
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: IG_REEL_SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `Reel Instagram:${author}${link}\n\nDescripción:\n${description}${transcript}${ocr}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.2,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: IG_REEL_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `Reel Instagram:${author}${link}\n\nDescripción:\n${description}${transcript}${ocr}`,
+        },
+      ],
     })
 
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/ig] API error:', res.status, errText)
-      return mockInstagramExtraction(description, input)
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
     const parsed = parseJsonSafe(raw) as Partial<BookmarkExtraction> | null
     if (parsed) {
       const base = normalizeBookmarkExtraction(parsed, description)
@@ -915,7 +842,7 @@ function mockInstagramExtraction(
   }
 }
 
-/** Extrae texto de un fotograma (Unlimited-OCR) o explica con Cohere Vision. */
+/** Extrae texto de un fotograma (Unlimited-OCR) o explica con visión LLM. */
 export async function explainVideoFrame(
   imageAbsPath: string,
   tSec: number,
@@ -930,62 +857,32 @@ export async function explainVideoFrame(
     console.warn('[cohere/ig] Unlimited-OCR frame:', err)
   }
 
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-
-  if (!apiKey || !fs.existsSync(imageAbsPath)) {
+  if (!canCallLlm('vision') || !fs.existsSync(imageAbsPath)) {
     return `(t=${tSec}s) fotograma sin análisis`
   }
 
   try {
     const buf = fs.readFileSync(imageAbsPath)
     const b64 = buf.toString('base64')
-    const model =
-      env('COHERE_VISION_MODEL') || 'command-a-vision-07-2025'
-
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `Fotograma de un reel de Instagram en t=${tSec}s. En 1–3 oraciones en español: qué se ve, texto en pantalla (OCR) y de qué parece tratar. Sé concreto.`,
-              },
-              {
-                type: 'image_url',
-                image_url: { url: `data:image/jpeg;base64,${b64}` },
-              },
-            ],
-          },
-        ],
-      }),
+    const { text } = await llmChat({
+      role: 'vision',
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Fotograma de un reel de Instagram en t=${tSec}s. En 1–3 oraciones en español: qué se ve, texto en pantalla (OCR) y de qué parece tratar. Sé concreto.`,
+            },
+            {
+              type: 'image_url',
+              image_url: { url: `data:image/jpeg;base64,${b64}` },
+            },
+          ],
+        },
+      ],
     })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/vision] API error:', res.status, errText)
-      return `(t=${tSec}s) visión no disponible`
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-    const text =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
     return text.replace(/\s+/g, ' ').trim() || `(t=${tSec}s) vacío`
   } catch (err) {
     console.error('[cohere/vision] failed:', err)
@@ -1148,19 +1045,14 @@ function normalizeVisionMeta(
 export async function analyzeNotebookPage(
   imageAbsPath: string,
 ): Promise<import('../types.js').NotebookPageVisionResult> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-
-  if (!apiKey) {
-    throw new Error('Falta COHERE_API_KEY en .env')
+  if (!canCallLlm('vision')) {
+    throw new Error('Falta API key del proveedor de visión en .env')
   }
   if (!fs.existsSync(imageAbsPath)) {
     throw new Error(`Imagen no encontrada: ${imageAbsPath}`)
   }
 
   const encoded = await encodeImageForVision(imageAbsPath)
-  const model = env('COHERE_VISION_MODEL') || 'command-a-vision-07-2025'
   console.log(
     `[cohere/notebook-vision] ${path.basename(imageAbsPath)} → ${encoded.width}x${encoded.height} jpeg ${(encoded.bytes / 1024).toFixed(0)} KB`,
   )
@@ -1179,29 +1071,22 @@ export async function analyzeNotebookPage(
   ]
 
   const call = async (prompt: string, withJsonFormat: boolean) => {
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
+    try {
+      const result = await llmChat({
+        role: 'vision',
         temperature: 0,
         messages: messagesFor(prompt),
-        ...(withJsonFormat ? { response_format: { type: 'json_object' } } : {}),
-      }),
-    })
-    const errText = res.ok ? '' : await res.text()
-    if (!res.ok) {
-      const err = new Error(
-        `Cohere visión ${res.status}: ${errText.slice(0, 400)}`,
-      ) as Error & { status?: number }
-      err.status = res.status
-      throw err
+        ...(withJsonFormat
+          ? { responseFormat: { type: 'json_object' as const } }
+          : {}),
+      })
+      return result
+    } catch (err) {
+      const status = (err as Error & { status?: number }).status
+      const e = err as Error & { status?: number }
+      e.status = status
+      throw e
     }
-    return (await res.json()) as unknown
   }
 
   const retryable = (err: unknown) => {
@@ -1214,7 +1099,10 @@ export async function analyzeNotebookPage(
     )
   }
 
-  async function callWithRetry(prompt: string, withJson: boolean): Promise<unknown> {
+  async function callWithRetry(
+    prompt: string,
+    withJson: boolean,
+  ): Promise<{ text: string }> {
     try {
       return await call(prompt, withJson)
     } catch (err) {
@@ -1223,7 +1111,7 @@ export async function analyzeNotebookPage(
       console.warn(
         `[cohere/notebook-vision] ${status}, reintento sin json_object…`,
       )
-      await delay(Math.max(delayMs, 3000))
+      await delay(3000)
       try {
         return await call(prompt, false)
       } catch (err2) {
@@ -1237,13 +1125,13 @@ export async function analyzeNotebookPage(
 
   const parseFrom = async (prompt: string, preferJson: boolean) => {
     let data = await callWithRetry(prompt, preferJson)
-    let raw = chatTextFromCohere(data)
+    let raw = data.text
     try {
       return extractJsonObject(raw)
     } catch (parseErr) {
       console.warn('[cohere/notebook-vision] JSON inválido, reintento:', parseErr)
       data = await callWithRetry(prompt, !preferJson)
-      raw = chatTextFromCohere(data)
+      raw = data.text
       return extractJsonObject(raw)
     }
   }
@@ -1310,41 +1198,28 @@ export async function explainNotebookPage(input: {
   numero_logico: number
   extraContext?: string
 }): Promise<string> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-
   const graphicsSummary =
     input.graphic_elements.length > 0
       ? JSON.stringify(input.graphic_elements)
       : '(ninguno)'
 
-  if (!apiKey) {
+  if (!canCallLlm('main')) {
     return `Explicación (local): ${input.title}. ${input.transcription.slice(0, 400)}`
   }
 
   try {
-    const model =
-      env('COHERE_MODEL') || env('COHERE_MODEL_FAST') || 'command-r-plus-08-2024'
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.3,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Sos el analista de cuadernos de Deprocast. Explicá en español (2-4 párrafos) el sentido de UNA hoja usando la transcripción, los elementos gráficos y el contexto extra del operador (audio STT, notas, planilla) si viene. Prohibido inventar hechos que no estén en esos materiales. Si la transcripción es una lista de títulos o está casi vacía, describí eso (estructura y palabras reales) sin rellenar. Sin markdown ni JSON.',
-          },
-          {
-            role: 'user',
-            content: `Hoja ${input.numero_logico} (${input.posicion})
+    const { text } = await llmChat({
+      role: 'main',
+      temperature: 0.3,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Sos el analista de cuadernos de Deprocast. Explicá en español (2-4 párrafos) el sentido de UNA hoja usando la transcripción, los elementos gráficos y el contexto extra del operador (audio STT, notas, planilla) si viene. Prohibido inventar hechos que no estén en esos materiales. Si la transcripción es una lista de títulos o está casi vacía, describí eso (estructura y palabras reales) sin rellenar. Sin markdown ni JSON.',
+        },
+        {
+          role: 'user',
+          content: `Hoja ${input.numero_logico} (${input.posicion})
 Título: ${input.title}
 
 Transcripción espacial:
@@ -1355,25 +1230,9 @@ ${graphicsSummary}
 
 Contexto extra del operador (puede estar vacío):
 ${(input.extraContext || '').trim() || '(ninguno)'}`,
-          },
-        ],
-      }),
+        },
+      ],
     })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/notebook-explain]', res.status, errText)
-      return `Explicación pendiente. Título: ${input.title}.`
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-    const text =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
     return text.trim() || `Explicación de: ${input.title}`
   } catch (err) {
     console.error('[cohere/notebook-explain] failed:', err)
@@ -1395,29 +1254,60 @@ export async function extractNotebookEntities(input: {
   explanation: string
   mentioned?: Array<{ kind: string; entity_name: string }>
 }): Promise<NotebookEntity[]> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
+  const blob = [
+    input.title,
+    input.transcription,
+    input.explanation,
+    ...(input.mentioned ?? []).map(
+      (m) => `${m.entity_name} (${m.kind})`,
+    ),
+  ]
+    .filter(Boolean)
+    .join('\n\n')
 
-  if (!apiKey) return []
+  const route = resolveLlmRoute('fast')
+  if (route.provider === 'groq') {
+    if (!route.apiKey) return []
+    try {
+      let knownEntities: ReturnType<typeof listNerLexicon> = []
+      try {
+        knownEntities = listNerLexicon(getDb())
+      } catch {
+        knownEntities = []
+      }
+      const groq = await extractDeprocastEntities(blob, {
+        model: route.model,
+        knownEntities,
+        maxQuantomos: 1,
+      })
+      return groq.entidades
+        .map((e) => groqEntityToCohere(e))
+        .filter((e) => e.type === 'person' || e.type === 'project')
+        .map((e) => ({
+          name: e.name,
+          type: e.type as 'person' | 'project',
+          kind:
+            e.type === 'person' ? refinePersonKind(e.name, e.kind) : e.kind,
+          category: e.category,
+          status: e.status,
+        }))
+    } catch (err) {
+      console.error('[groq/notebook-ner]', err)
+      return []
+    }
+  }
+
+  if (!canCallLlm('fast')) return []
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          {
-            role: 'system',
-            content: `Extraé entidades de una hoja de cuaderno. JSON único:
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.2,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `Extraé entidades de una hoja de cuaderno. JSON único:
 {"entities":[{"name":string,"type":"person"|"project","kind"?:string,"category"?:string,"status"?:string}]}
 Reglas Deprocast NER:
 - type=person SOLO si es una Persona real: nombre propio de humana (kind=fisica), org/marca/estudio (juridica), o personaje (ficticia).
@@ -1427,35 +1317,19 @@ Reglas Deprocast NER:
 - Si dudás entre concepto y persona → OMITÍ o kind=abstracta (nunca fisica).
 - type=project = iniciativas/productos/obras con nombre propio, no etiquetas de lista.
 - Preferí pocas entidades correctas a muchas dudosas. Solo JSON.`,
-          },
-          {
-            role: 'user',
-            content: `Título: ${input.title}\n\nTranscripción:\n${input.transcription}\n\nExplicación:\n${input.explanation}${
-              input.mentioned?.length
-                ? `\n\nEl operador ya señaló estas entidades (reconocelas y extraé otras relacionadas):\n${input.mentioned
-                    .map((m) => `- ${m.entity_name} (${m.kind})`)
-                    .join('\n')}`
-                : ''
-            }`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+        },
+        {
+          role: 'user',
+          content: `Título: ${input.title}\n\nTranscripción:\n${input.transcription}\n\nExplicación:\n${input.explanation}${
+            input.mentioned?.length
+              ? `\n\nEl operador ya señaló estas entidades (reconocelas y extraé otras relacionadas):\n${input.mentioned
+                  .map((m) => `- ${m.entity_name} (${m.kind})`)
+                  .join('\n')}`
+              : ''
+          }`,
+        },
+      ],
     })
-
-    if (!res.ok) {
-      console.error('[cohere/notebook-ner]', res.status, await res.text())
-      return []
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      '{}'
     const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()) as {
       entities?: NotebookEntity[]
     }
@@ -1467,33 +1341,10 @@ Reglas Deprocast NER:
         kind: e.type === 'person' ? refinePersonKind(e.name, e.kind) : e.kind,
       }))
   } catch (err) {
-    console.error('[cohere/notebook-ner] failed:', err)
+    console.error('[cohere/notebook-ner]', err)
     return []
   }
 }
-
-const AGRUPACION_META_PROMPT = `Eres el analista de agrupaciones de Deprocast.
-Recibes el nombre de una agrupación de personas, una lista de miembros, y notas libres del usuario (descripción o bullets).
-Tu trabajo: entender la intención del usuario y derivar metadata estructurada que une a esos miembros.
-Devuelve ÚNICAMENTE un JSON válido (sin markdown) con esta forma exacta:
-{
-  "summary": string,
-  "tags": string[],
-  "themes": string[],
-  "related_person_names": string[],
-  "related_categories": string[],
-  "inferred_facts": string[]
-}
-Reglas:
-- summary = 1-2 oraciones en español que capturan el criterio de la agrupación.
-- tags = etiquetas cortas (1-3 palabras) útiles para filtrar.
-- themes = temas o ejes (origen compartido, vínculo social, temática intelectual, tecnología, etc.).
-- related_person_names = nombres de personas mencionadas en las notas (o miembros centrales), sin inventar.
-- related_categories = categorías explícitas o implícitas (geográfica, temática, social, profesional…).
-- inferred_facts = bullets cortos derivados de las notas + miembros (hechos o hipótesis suaves).
-- No reescribas las notas del usuario; solo deriva metadata.
-- Si las notas están vacías, inferí solo desde el nombre y los miembros, con cautela.
-- Responde solo JSON.`
 
 function emptyAgrupacionMeta(): AgrupacionGeneratedMeta {
   return {
@@ -1580,66 +1431,45 @@ function parseAgrupacionMetaJson(
   }
 }
 
+const AGRUPACION_META_PROMPT = `Eres el extractor de metadatos de agrupaciones de Deprocast.
+Dado el nombre, miembros y notas, devolvés ÚNICAMENTE un JSON válido (sin markdown):
+{
+  "summary": string,
+  "tags": string[],
+  "themes": string[],
+  "related_person_names": string[],
+  "related_categories": string[],
+  "inferred_facts": string[]
+}
+Idioma: español. No inventes miembros que no estén en la lista.`
+
 export async function extractAgrupacionMeta(input: {
   name: string
   notes: string
   members: string[]
 }): Promise<AgrupacionGeneratedMeta> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) {
-    await delay(delayMs)
-  }
-
   const { name, notes, members } = input
 
-  if (!apiKey) {
+  if (!canCallLlm('fast')) {
     return mockAgrupacionMeta(name, notes, members)
   }
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
-
     const memberList =
       members.length > 0 ? members.map((m) => `- ${m}`).join('\n') : '(sin miembros)'
 
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: AGRUPACION_META_PROMPT },
-          {
-            role: 'user',
-            content: `Nombre de la agrupación: ${name}\n\nMiembros:\n${memberList}\n\nNotas del usuario:\n${notes || '(vacío)'}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.2,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: AGRUPACION_META_PROMPT },
+        {
+          role: 'user',
+          content: `Nombre de la agrupación: ${name}\n\nMiembros:\n${memberList}\n\nNotas del usuario:\n${notes || '(vacío)'}`,
+        },
+      ],
     })
-
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/agrupacion] API error:', res.status, errText)
-      return mockAgrupacionMeta(name, notes, members)
-    }
-
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
 
     const parsed = parseAgrupacionMetaJson(raw)
     return normalizeAgrupacionMeta(parsed, name, notes, members)
@@ -1679,10 +1509,12 @@ Reglas:
 - title = 3 a 5 palabras, sin puntuación final.
 - summary = 2-4 oraciones del bloque (español).
 - quantomo = UNA oración densa: la idea/acuerdo/hito central del bloque.
+- suggested_weight = 1-12. Si algún hablador es IA, sugerí 3-5 salvo hito humano fuerte.
 - entities = personas nombradas (no remitentes genéricos del propio chat si solo firman) y proyectos creativos/productoras/plataformas (ej. El Fotógrafo, Versa, Studianta, Terreta Hub).
 - locations = zonas/ciudades/lugares logísticos mencionados.
 - milestones = hitos temporales o entregables (escenas, estrenos, ferias).
 - Omití ruido NER (calles sueltas sin contexto, interjecciones).
+- Las líneas prefijadas con [IA] son de un modelo, no de una persona física.
 - Solo JSON.`
 }
 
@@ -1757,72 +1589,95 @@ export async function extractFromChatBlock(input: {
   participantes: string[]
   transcript: string
   dayKey: string
+  habladores?: Array<{ remitente: string; person_name: string; is_ai?: boolean }>
+  linkedPeople?: string[]
+  linkedProjects?: string[]
+  linkedEntities?: string[]
+  notes?: string
+  links?: string[]
 }): Promise<ChatExtraction> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-
   const { chatName, tipo, participantes, dayKey } = input
-  // Limitar contexto para no reventar el modelo en bloques densos
   const transcript =
     input.transcript.length > 14000
       ? `${input.transcript.slice(0, 14000)}\n\n[…truncado…]`
       : input.transcript
 
-  if (!apiKey) {
+  if (!canCallLlm('fast')) {
     throw new Error(
-      'COHERE_API_KEY no configurada: no se puede analizar el bloque de chat',
+      'API key LLM no configurada: no se puede analizar el bloque de chat',
     )
   }
 
-  const model =
-    env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
   const plist =
     participantes.length > 0
       ? participantes.map((p) => `- ${p}`).join('\n')
       : '(desconocidos)'
 
-  const res = await fetch('https://api.cohere.com/v2/chat', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    signal: AbortSignal.timeout(90_000),
-    body: JSON.stringify({
-      model,
+  const habladores =
+    (input.habladores ?? [])
+      .filter((h) => h.remitente && h.person_name)
+      .map((h) =>
+        h.is_ai
+          ? `- WhatsApp «${h.remitente}» = perfil IA «${h.person_name}»`
+          : `- WhatsApp «${h.remitente}» = perfil «${h.person_name}»`,
+      )
+      .join('\n')
+  const hasAiSpeaker = (input.habladores ?? []).some((h) => h.is_ai)
+  const peopleCtx = (input.linkedPeople ?? []).filter(Boolean).join(', ')
+  const projectCtx = (input.linkedProjects ?? []).filter(Boolean).join(', ')
+  const entityCtx = (input.linkedEntities ?? []).filter(Boolean).join(', ')
+
+  const extraCtx = [
+    habladores
+      ? `Habladores (identidad canónica — usá estos nombres de perfil):\n${habladores}`
+      : '',
+    hasAiSpeaker
+      ? 'Hay al menos un conversante IA: no lo trates como persona física; suggested_weight más bajo salvo hito humano claro.'
+      : '',
+    peopleCtx ? `Personas vinculadas a este bloque: ${peopleCtx}` : '',
+    projectCtx ? `Proyectos vinculados a este bloque: ${projectCtx}` : '',
+    entityCtx
+      ? `Otras entidades vinculadas a este bloque: ${entityCtx}`
+      : '',
+    input.notes?.trim()
+      ? `Notas HITL de este chat (prioridad alta): ${input.notes.trim()}`
+      : '',
+    (input.links ?? []).length
+      ? `Links extraídos/anclados:\n${(input.links ?? []).map((u) => `- ${u}`).join('\n')}`
+      : '',
+    'Los habladores listados son de TODA la conversación: el quántomo debe atribuirles la voz con sus nombres de perfil.',
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  let raw: string
+  try {
+    const result = await llmChat({
+      role: 'fast',
       temperature: 0.2,
+      responseFormat: { type: 'json_object' },
       messages: [
         { role: 'system', content: chatSystemPrompt(tipo) },
         {
           role: 'user',
-          content: `Chat: ${chatName}\nTipo: ${tipo}\nJornada: ${dayKey}\nParticipantes del chat:\n${plist}\n\nBloque:\n${transcript}`,
+          content: `Chat: ${chatName}\nTipo: ${tipo}\nJornada: ${dayKey}\nParticipantes del chat:\n${plist}${
+            extraCtx ? `\n${extraCtx}` : ''
+          }\n\nBloque:\n${transcript}`,
         },
       ],
-      response_format: { type: 'json_object' },
-    }),
-  })
-
-  if (!res.ok) {
-    const errText = await res.text()
-    console.error('[cohere/chat]', res.status, errText)
-    if (res.status === 429) {
+    })
+    raw = result.text || '{}'
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error('[cohere/chat]', msg)
+    if (/429/.test(msg)) {
       throw new Error(
-        'Cohere rate limit (429). Esperá un minuto o subí la key a Production.',
+        'LLM rate limit (429). Esperá un minuto o revisá la key / cuota.',
       )
     }
-    throw new Error(`Cohere chat extract falló (${res.status})`)
+    throw new Error(`Chat extract falló: ${msg.slice(0, 200)}`)
   }
 
-  const data = (await res.json()) as {
-    message?: { content?: Array<{ type?: string; text?: string }> }
-    text?: string
-  }
-  const raw =
-    data.message?.content?.map((c) => c.text ?? '').join('') ||
-    data.text ||
-    '{}'
   let parsed: Partial<ChatExtraction> | null = null
   try {
     const cleaned = raw
@@ -1830,9 +1685,9 @@ export async function extractFromChatBlock(input: {
       .replace(/```/g, '')
       .trim()
     parsed = JSON.parse(cleaned) as Partial<ChatExtraction>
-  } catch (err) {
+  } catch {
     console.error('[cohere/chat] JSON inválido:', raw.slice(0, 400))
-    throw new Error('Cohere devolvió JSON inválido para el bloque de chat')
+    throw new Error('LLM devolvió JSON inválido para el bloque de chat')
   }
   return normalizeChatExtraction(parsed, transcript, chatName)
 }
@@ -1895,51 +1750,25 @@ export async function proposeIdaCards(
   body: string,
 ): Promise<DeproIdaCardProposal[]> {
   const fallback = mockIdaCards(title, body)
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-  if (!apiKey) return fallback
+  if (!canCallLlm('fast')) return fallback
 
   try {
-    const model =
-      env('COHERE_MODEL_FAST') || env('COHERE_MODEL') || 'command-r-08-2024'
-    const res = await fetch('https://api.cohere.com/v2/chat', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.3,
-        messages: [
-          {
-            role: 'system',
-            content:
-              'Sos un tutor. Dado un concepto destilado, proponé exactamente 3 flashcards de recall activo: pregunta corta, respuesta precisa. Español. JSON: {"cards":[{"question":"...","answer":"..."}]}. Las preguntas deben obligar a recordar, no a reconocer. Sin cloze, sin markdown.',
-          },
-          {
-            role: 'user',
-            content: `Título: ${title}\n\nCuerpo:\n${body || '(vacío)'}`,
-          },
-        ],
-        response_format: { type: 'json_object' },
-      }),
+    const { text: raw } = await llmChat({
+      role: 'fast',
+      temperature: 0.3,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Sos un tutor. Dado un concepto destilado, proponé exactamente 3 flashcards de recall activo: pregunta corta, respuesta precisa. Español. JSON: {"cards":[{"question":"...","answer":"..."}]}. Las preguntas deben obligar a recordar, no a reconocer. Sin cloze, sin markdown.',
+        },
+        {
+          role: 'user',
+          content: `Título: ${title}\n\nCuerpo:\n${body || '(vacío)'}`,
+        },
+      ],
     })
-    if (!res.ok) {
-      const errText = await res.text()
-      console.error('[cohere/ida-cards] API error:', res.status, errText)
-      return fallback
-    }
-    const data = (await res.json()) as {
-      message?: { content?: Array<{ type?: string; text?: string }> }
-      text?: string
-    }
-    const raw =
-      data.message?.content?.map((c) => c.text ?? '').join('') ||
-      data.text ||
-      ''
     const parsed = parseIdaCardsJson(raw)
     if (!parsed) return fallback
     while (parsed.length < 3) {
@@ -1966,47 +1795,21 @@ export type CorpusChatMessage = {
 export async function chatWithCorpus(opts: {
   system: string
   messages: CorpusChatMessage[]
+  role?: import('./appSettings.js').LlmRole
 }): Promise<string> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-  if (!apiKey) {
-    throw new Error('Falta COHERE_API_KEY en .env')
-  }
-
-  const model =
-    env('COHERE_MODEL') || env('COHERE_MODEL_FAST') || 'command-r-08-2024'
-
-  const res = await fetch('https://api.cohere.com/v2/chat', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.3,
-      messages: [
-        { role: 'system', content: opts.system },
-        ...opts.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-      ],
-    }),
+  const { text } = await llmChat({
+    role: opts.role ?? 'main',
+    temperature: 0.3,
+    messages: [
+      { role: 'system', content: opts.system },
+      ...opts.messages.map((m) => ({
+        role: m.role,
+        content: m.content,
+      })),
+    ],
   })
-
-  if (!res.ok) {
-    const errText = await res.text()
-    console.error('[cohere/dialogo] API error:', res.status, errText)
-    throw new Error(`Cohere chat falló (${res.status}): ${errText.slice(0, 240)}`)
-  }
-
-  const data = (await res.json()) as unknown
-  const text = chatTextFromCohere(data).trim()
   if (!text) {
-    throw new Error('Cohere devolvió respuesta vacía')
+    throw new Error('LLM devolvió respuesta vacía')
   }
   return text
 }
@@ -2031,77 +1834,8 @@ export type ChatToolTurn =
   | { role: 'assistant'; content?: string; tool_calls: unknown }
   | { role: 'tool'; tool_call_id: string; content: string }
 
-function parseJsonObject(raw: unknown): Record<string, unknown> {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    return raw as Record<string, unknown>
-  }
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw) as unknown
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>
-      }
-    } catch {
-      return {}
-    }
-  }
-  return {}
-}
-
-export function parseCohereToolCalls(data: unknown): ChatToolCall[] {
-  const root = data as {
-    message?: { tool_calls?: unknown; content?: unknown }
-    tool_calls?: unknown
-  }
-  const buckets: unknown[] = []
-  const fromMsg = root.message?.tool_calls
-  const fromRoot = root.tool_calls
-  if (Array.isArray(fromMsg)) buckets.push(...fromMsg)
-  if (Array.isArray(fromRoot)) buckets.push(...fromRoot)
-  const content = root.message?.content
-  if (Array.isArray(content)) {
-    for (const item of content) {
-      if (
-        item &&
-        typeof item === 'object' &&
-        ((item as { type?: string }).type === 'tool_call' ||
-          (item as { type?: string }).type === 'tool_use')
-      ) {
-        buckets.push(item)
-      }
-    }
-  }
-  const out: ChatToolCall[] = []
-  for (const raw of buckets) {
-    if (!raw || typeof raw !== 'object') continue
-    const o = raw as {
-      id?: string
-      name?: string
-      type?: string
-      function?: { name?: string; arguments?: unknown }
-      arguments?: unknown
-    }
-    const name = String(o.function?.name ?? o.name ?? '').trim()
-    if (!name) continue
-    const id =
-      String(o.id ?? '').trim() ||
-      `tool_${out.length + 1}`
-    out.push({
-      id,
-      name,
-      arguments: parseJsonObject(o.function?.arguments ?? o.arguments),
-    })
-  }
-  return out
-}
-
-export function cohereAssistantMessage(data: unknown): unknown {
-  const root = data as { message?: unknown }
-  return root.message ?? data
-}
-
 /**
- * Un turno de chat con tools (Cohere v2). No ejecuta las tools:
+ * Un turno de chat con tools. No ejecuta las tools:
  * el caller corre el intérprete y reenvía resultados.
  */
 export async function chatWithTools(opts: {
@@ -2109,58 +1843,142 @@ export async function chatWithTools(opts: {
   messages: ChatToolTurn[]
   tools: ChatToolSpec[]
   temperature?: number
+  role?: import('./appSettings.js').LlmRole
 }): Promise<{
   text: string
   toolCalls: ChatToolCall[]
   rawAssistant: unknown
 }> {
-  const apiKey = env('COHERE_API_KEY')
-  const delayMs = Number(env('COHERE_REQUEST_DELAY_MS', '2000')) || 0
-  if (delayMs > 0) await delay(delayMs)
-  if (!apiKey) {
-    throw new Error('Falta COHERE_API_KEY en .env')
-  }
-
-  const model =
-    env('COHERE_MODEL') || env('COHERE_MODEL_FAST') || 'command-r-08-2024'
-
-  const res = await fetch('https://api.cohere.com/v2/chat', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: opts.temperature ?? 0.2,
-      tools: opts.tools,
-      messages: [
-        { role: 'system', content: opts.system },
-        ...opts.messages.map((m) => {
-          if (m.role === 'tool') {
-            return {
-              role: 'tool',
-              tool_call_id: m.tool_call_id,
-              content: m.content,
-            }
+  const result = await llmChat({
+    role: opts.role ?? 'main',
+    temperature: opts.temperature ?? 0.2,
+    tools: opts.tools,
+    messages: [
+      { role: 'system', content: opts.system },
+      ...opts.messages.map((m) => {
+        if (m.role === 'tool') {
+          return {
+            role: 'tool' as const,
+            tool_call_id: m.tool_call_id,
+            content: m.content,
           }
-          return m
-        }),
-      ],
-    }),
+        }
+        return m
+      }),
+    ],
   })
-
-  if (!res.ok) {
-    const errText = await res.text()
-    console.error('[cohere/sentinela] API error:', res.status, errText)
-    throw new Error(`Cohere chat falló (${res.status}): ${errText.slice(0, 240)}`)
-  }
-
-  const data = (await res.json()) as unknown
   return {
-    text: chatTextFromCohere(data).trim(),
-    toolCalls: parseCohereToolCalls(data),
-    rawAssistant: cohereAssistantMessage(data),
+    text: result.text,
+    toolCalls: result.toolCalls as ChatToolCall[],
+    rawAssistant: result.rawAssistant,
   }
 }
+
+export type NotebookL72AtomDraft = {
+  power_index: number
+  title: string
+  content: string
+  weight: number
+  page_refs?: string[]
+}
+
+/** Destila 9 átomos L72 para un dominio (índices base..base+8). */
+export async function distillNotebookL72Domain(input: {
+  notebookTitle: string
+  domainIndex: number
+  domainLabel: string
+  powerSlots: Array<{
+    power_index: number
+    visible: string
+    oficio: string
+  }>
+  pageContext: string
+  pageQuantomoRefs: Array<{ id: string; title: string; excerpt: string }>
+}): Promise<NotebookL72AtomDraft[]> {
+  const baseWeight = 8
+  const fallback = (): NotebookL72AtomDraft[] =>
+    input.powerSlots.map((slot, i) => {
+      const ref = input.pageQuantomoRefs[i % Math.max(1, input.pageQuantomoRefs.length)]
+      return {
+        power_index: slot.power_index,
+        title: `${slot.visible} ${input.domainLabel} · ${slot.oficio}`,
+        content:
+          ref?.excerpt?.slice(0, 500) ||
+          `Síntesis L72 del cuaderno «${input.notebookTitle}» para ${input.domainLabel} / ${slot.oficio}.`,
+        weight: baseWeight,
+        page_refs: ref ? [ref.id] : [],
+      }
+    })
+
+  if (!canCallLlm('main')) return fallback()
+
+  try {
+    const { text: raw } = await llmChat({
+      role: 'main',
+      temperature: 0.35,
+      responseFormat: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `Sos el convertidor L72 de cuadernos Deprocast. Dado el contexto de un cuaderno ya procesado (hojas + quántomos por hoja), destilá exactamente ${input.powerSlots.length} átomos de síntesis para el dominio «${input.domainLabel}».
+JSON único:
+{"atoms":[{"power_index":number,"title":string,"content":string,"weight":number,"page_refs":string[]}]}
+Reglas:
+- Un átomo por cada power_index listado (no inventes otros índices).
+- title corto (≤12 palabras); content 2-5 oraciones en español, sin markdown.
+- weight entero 7-10 (síntesis de cuaderno completo).
+- page_refs: ids de quántomos-hoja que alimentan el átomo (si aplica).
+- No inventes hechos ajenos al contexto. Si el dominio apenas aparece, sintetizá con honestidad (estructura / hueco).
+- Solo JSON.`,
+        },
+        {
+          role: 'user',
+          content: `Cuaderno: ${input.notebookTitle}
+Dominio ${input.domainIndex} · ${input.domainLabel}
+
+Slots a cubrir:
+${input.powerSlots
+  .map((s) => `- ${s.visible} (index ${s.power_index}): ${s.oficio}`)
+  .join('\n')}
+
+Quántomos por hoja (refs):
+${input.pageQuantomoRefs
+  .slice(0, 40)
+  .map((q) => `- [${q.id}] ${q.title}: ${q.excerpt.slice(0, 220)}`)
+  .join('\n') || '(ninguno)'}
+
+Contexto de hojas (recortado):
+${input.pageContext.slice(0, 12000)}`,
+        },
+      ],
+    })
+
+    const parsed = JSON.parse(
+      raw.replace(/```json|```/gi, '').trim(),
+    ) as { atoms?: NotebookL72AtomDraft[] }
+    const byIndex = new Map<number, NotebookL72AtomDraft>()
+    for (const a of parsed.atoms ?? []) {
+      const idx = Number(a.power_index)
+      if (!Number.isFinite(idx)) continue
+      byIndex.set(idx, {
+        power_index: idx,
+        title: String(a.title || '').trim() || `Poder ${idx + 1}`,
+        content: String(a.content || '').trim() || fallback().find((f) => f.power_index === idx)?.content || '',
+        weight: Math.max(7, Math.min(10, Math.round(Number(a.weight) || baseWeight))),
+        page_refs: Array.isArray(a.page_refs)
+          ? a.page_refs.map(String).filter(Boolean).slice(0, 12)
+          : [],
+      })
+    }
+
+    const out: NotebookL72AtomDraft[] = []
+    for (const slot of input.powerSlots) {
+      out.push(byIndex.get(slot.power_index) ?? fallback().find((f) => f.power_index === slot.power_index)!)
+    }
+    return out
+  } catch (err) {
+    console.error('[cohere/notebook-l72] domain failed:', input.domainLabel, err)
+    return fallback()
+  }
+}
+

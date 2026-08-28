@@ -15,9 +15,11 @@ import {
   type ChatToolTurn,
 } from './cohere.js'
 import { createIda } from './deprocast.js'
-import { searchSimilar, upsertEmbedding } from './embeddings.js'
+import { deleteEmbedding, searchSimilar, upsertEmbedding } from './embeddings.js'
 import { searchGraphContext } from './graph.js'
 import { getPipelineStatus } from './pipeline.js'
+import { getSentinelBrain } from './appSettings.js'
+import { isPayloadTooLargeError } from './llmChat.js'
 
 export type SentinelStatus =
   | 'inspecting'
@@ -38,6 +40,7 @@ export type SentinelSkillStatus = 'draft' | 'accepted' | 'rejected'
 export type SentinelAgent = {
   id: string
   code: string
+  name: string
   status: SentinelStatus
   profile_md: string
   created_at: string
@@ -92,9 +95,13 @@ export type SentinelSkill = {
 
 const ROOT = process.cwd()
 const ALMA_PATH = path.join(ROOT, 'server', 'prompts', 'alma-sentinela.md')
-const MAX_SOURCE = 20_000
-const MAX_HARVEST = 42_000
-const MAX_TOOL_RESULT = 8_000
+const MAX_SOURCE = 4_000
+/** Índice de nacimiento: cabe en Groq TPM on_demand. El código se lee en misión. */
+const MAX_HARVEST = 8_000
+const MAX_DOC_TEASER = 180
+const MAX_DOCS = 8
+const MAX_TOOL_RESULT = 2_400
+const MAX_PROFILE_IN_MISSION = 2_800
 const MAX_ROUNDS = 8
 
 const inspectAbort = new Set<string>()
@@ -146,6 +153,7 @@ function loadAlma(): string {
 type AgentRow = {
   id: string
   code: string
+  name: string | null
   status: string
   profile_md: string
   created_at: string
@@ -185,6 +193,7 @@ function mapAgent(r: AgentRow): SentinelAgent {
   return {
     id: r.id,
     code: r.code,
+    name: (r.name ?? '').trim() || r.code,
     status: r.status as SentinelStatus,
     profile_md: r.profile_md,
     created_at: r.created_at,
@@ -316,7 +325,7 @@ export function getAgent(id: string): SentinelAgent | null {
   const r = row<AgentRow>(
     getDb()
       .prepare(
-        `SELECT id, code, status, profile_md, created_at, updated_at
+        `SELECT id, code, name, status, profile_md, created_at, updated_at
          FROM sentinel_agents WHERE id = ?`,
       )
       .get(id),
@@ -328,7 +337,7 @@ export function listAgents(): SentinelAgent[] {
   return rows<AgentRow>(
     getDb()
       .prepare(
-        `SELECT id, code, status, profile_md, created_at, updated_at
+        `SELECT id, code, name, status, profile_md, created_at, updated_at
          FROM sentinel_agents ORDER BY created_at DESC`,
       )
       .all(),
@@ -390,29 +399,6 @@ function listRootMarkdown(): string[] {
     .readdirSync(ROOT)
     .filter((f) => f.toLowerCase().endsWith('.md'))
     .sort()
-}
-
-function walkDir(dir: string, acc: string[], depth: number): void {
-  if (depth > 6 || acc.length > 800) return
-  let entries: fs.Dirent[] = []
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true })
-  } catch {
-    return
-  }
-  for (const ent of entries) {
-    if (ent.name.startsWith('.')) continue
-    if (
-      ['node_modules', 'dist', 'dist-server', 'data', 'vault'].includes(
-        ent.name,
-      )
-    ) {
-      continue
-    }
-    const full = path.join(dir, ent.name)
-    if (ent.isDirectory()) walkDir(full, acc, depth + 1)
-    else acc.push(full)
-  }
 }
 
 function readRepoFile(rel: string, max = 14_000): string {
@@ -523,52 +509,89 @@ export function censusSnapshot(): Record<string, unknown> {
     cohere_key: Boolean(
       process.env.COHERE_API_KEY?.replace(/^["']|["']$/g, ''),
     ),
+    groq_key: Boolean(
+      process.env.GROQ_API_KEY?.replace(/^["']|["']$/g, ''),
+    ),
+    sentinel_brain: getSentinelBrain(),
     root_md: listRootMarkdown(),
   }
 }
 
-function catalogSnapshot(kind: string): unknown {
-  if (kind === 'agents') {
-    return readRepoFile('src/lib/deprocast/agents.ts')
-  }
+function catalogSnapshot(kind: string): string {
+  if (kind === 'agents') return compactAgents()
   if (kind === 'powers') {
-    return readRepoFile('src/lib/deprocast/powers.ts')
+    return clip(readRepoFile('src/lib/deprocast/powers.ts', 2_400), 2_400)
   }
-  return readRepoFile('src/lib/deprocast/modules.ts')
+  return compactModules()
+}
+
+function compactModules(): string {
+  try {
+    const src = fs.readFileSync(
+      path.join(ROOT, 'src/lib/deprocast/modules.ts'),
+      'utf8',
+    )
+    const lines: string[] = []
+    for (const m of src.matchAll(
+      /id:\s*'([^']+)'[\s\S]*?label:\s*'([^']+)'[\s\S]*?does:\s*'([^']+)'/g,
+    )) {
+      lines.push(`- ${m[1]} · ${m[2]}: ${m[3]}`)
+    }
+    return lines.length ? lines.join('\n') : clip(src, 2_000)
+  } catch {
+    return '(sin módulos)'
+  }
+}
+
+function compactAgents(): string {
+  try {
+    const src = fs.readFileSync(
+      path.join(ROOT, 'src/lib/deprocast/agents.ts'),
+      'utf8',
+    )
+    const lines: string[] = []
+    for (const m of src.matchAll(
+      /id:\s*'([^']+)'[\s\S]*?name:\s*'([^']+)'[\s\S]*?module:\s*'([^']+)'/g,
+    )) {
+      lines.push(`- ${m[1]} (${m[2]}) → ${m[3]}`)
+    }
+    return lines.length ? clip(lines.join('\n'), 2_200) : clip(src, 2_000)
+  } catch {
+    return '(sin agentes)'
+  }
 }
 
 function harvestText(): string {
   const parts: string[] = []
-  parts.push('# Censo\n' + JSON.stringify(censusSnapshot(), null, 2))
-  parts.push('# Módulos\n' + readRepoFile('src/lib/deprocast/modules.ts', 8_000))
-  parts.push('# Agentes\n' + readRepoFile('src/lib/deprocast/agents.ts', 8_000))
-  for (const md of listRootMarkdown()) {
+  parts.push('# Censo\n' + JSON.stringify(censusSnapshot()))
+  parts.push('# Módulos\n' + compactModules())
+  parts.push('# Agentes\n' + compactAgents())
+  const allDocs = listRootMarkdown()
+  const docs = allDocs.slice(0, MAX_DOCS)
+  const teasers: string[] = []
+  for (const md of docs) {
     try {
-      const body = fs.readFileSync(path.join(ROOT, md), 'utf8')
-      parts.push(`# DOC ${md}\n${clip(body, 4_000)}`)
+      const body = fs.readFileSync(path.join(ROOT, md), 'utf8').trim()
+      const first =
+        body.split('\n').find((l) => l.trim() && !l.startsWith('#')) ?? body
+      teasers.push(
+        `- ${md}: ${clip(first.replace(/\s+/g, ' '), MAX_DOC_TEASER)}`,
+      )
     } catch {
-      /* skip */
+      teasers.push(`- ${md}`)
     }
   }
-  const tokens = catalogFileTokens()
-  const files: string[] = []
-  walkDir(path.join(ROOT, 'src'), files, 0)
-  walkDir(path.join(ROOT, 'server'), files, 0)
-  let sourced = 0
-  for (const abs of files) {
-    if (sourced >= 10) break
-    const rel = path.relative(ROOT, abs).replace(/\\/g, '/')
-    const base = path.basename(abs)
-    if (base === 'alma-sentinela.md') continue
-    if (![...tokens].some((t) => base === t || rel.includes(t))) continue
-    if (!/\.(ts|tsx|md)$/.test(base)) continue
-    try {
-      parts.push(`# SRC ${rel}\n${clip(fs.readFileSync(abs, 'utf8'), 2_500)}`)
-      sourced += 1
-    } catch {
-      /* skip */
-    }
-  }
+  const extra = allDocs.length - docs.length
+  parts.push(
+    '# Docs\n' +
+      teasers.join('\n') +
+      (extra > 0
+        ? `\n(+${extra} más: ${allDocs.slice(MAX_DOCS).join(', ')})`
+        : ''),
+  )
+  parts.push(
+    'El código fuente no va en el harvest de nacimiento. En misión usá tools de lectura.',
+  )
   return clip(parts.join('\n\n'), MAX_HARVEST)
 }
 
@@ -610,15 +633,20 @@ async function inspectAgent(id: string): Promise<void> {
     if (!agent) return
     logEvent(id, 'observation', `Nacimiento ${agent.code}: harvest…`)
     const harvest = harvestText()
-    logEvent(id, 'timing', `Harvest ${harvest.length} chars · ${Date.now() - t0}ms`)
+    logEvent(
+      id,
+      'timing',
+      `Harvest compacto ${harvest.length} chars · ${Date.now() - t0}ms`,
+    )
     void embedDocs().catch((err) => console.warn('[sentinela] embed docs', err))
 
     let profile = ''
     try {
       profile = await chatWithCorpus({
+        role: 'sentinel',
         system:
           loadAlma() +
-          '\n\nEstás NACIENDO. A partir del harvest escribí un PERFIL en markdown: qué es Deprocast, mapa de módulos con IPO, huecos, contratos a vigilar, cómo inspeccionar. Máx 1200 palabras. No inventes archivos ausentes del harvest. No copies el alma.',
+          '\n\nEstás NACIENDO. El harvest es un ÍNDICE (censo + IPO de módulos/agentes + teasers de docs), no el repo entero. Escribí un PERFIL en markdown: qué es Deprocast, mapa de módulos con IPO, huecos, contratos a vigilar, cómo inspeccionar en misión. Máx 1200 palabras. No inventes archivos ausentes. No copies el alma.',
         messages: [
           {
             role: 'user',
@@ -628,18 +656,20 @@ async function inspectAgent(id: string): Promise<void> {
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logEvent(id, 'error', `LLM perfil: ${msg}`)
+      if (getAgent(id)) logEvent(id, 'error', `LLM perfil: ${msg}`)
       profile = fallbackProfile(agent.code, harvest, msg)
     }
 
-    if (inspectAbort.has(id)) {
+    if (inspectAbort.has(id) || !getAgent(id)) {
       inspectAbort.delete(id)
-      setAgentStatus(
-        id,
-        'error',
-        profile || fallbackProfile(agent.code, harvest, 'abortada'),
-      )
-      logEvent(id, 'error', 'Inspección abortada')
+      if (getAgent(id)) {
+        setAgentStatus(
+          id,
+          'error',
+          profile || fallbackProfile(agent.code, harvest, 'abortada'),
+        )
+        logEvent(id, 'error', 'Inspección abortada')
+      }
       return
     }
 
@@ -649,6 +679,7 @@ async function inspectAgent(id: string): Promise<void> {
       (err) => console.warn('[sentinela] embed profile', err),
     )
   } catch (err) {
+    if (!getAgent(id)) return
     const msg = err instanceof Error ? err.message : String(err)
     logEvent(id, 'error', msg)
     setAgentStatus(id, 'error')
@@ -663,10 +694,10 @@ export function createAgent(): SentinelAgent {
   const code = nextCode()
   getDb()
     .prepare(
-      `INSERT INTO sentinel_agents (id, code, status, profile_md, created_at, updated_at)
-       VALUES (?, ?, 'inspecting', '', ?, ?)`,
+      `INSERT INTO sentinel_agents (id, code, name, status, profile_md, created_at, updated_at)
+       VALUES (?, ?, ?, 'inspecting', '', ?, ?)`,
     )
-    .run(id, code, ts, ts)
+    .run(id, code, code, ts, ts)
   logEvent(id, 'observation', `Creada ${code}`)
   void inspectAgent(id)
   return getAgent(id)!
@@ -680,6 +711,48 @@ export function abortInspect(id: string): SentinelAgent {
   setAgentStatus(id, 'error')
   logEvent(id, 'error', 'Operador abortó la inspección')
   return getAgent(id)!
+}
+
+export function renameAgent(id: string, rawName: string): SentinelAgent {
+  const agent = getAgent(id)
+  if (!agent) throw new Error('Sentinela no encontrada')
+  const name = rawName.replace(/\s+/g, ' ').trim()
+  if (!name) throw new Error('El nombre está vacío')
+  if (name.length > 80) throw new Error('Nombre demasiado largo (máx. 80)')
+  if (name === agent.name) return agent
+  getDb()
+    .prepare(
+      `UPDATE sentinel_agents SET name = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(name, nowIso(), id)
+  logEvent(id, 'observation', `Renombrada: ${agent.name} → ${name}`)
+  return getAgent(id)!
+}
+
+export function deleteAgent(id: string): void {
+  const agent = getAgent(id)
+  if (!agent) throw new Error('Sentinela no encontrada')
+  inspectAbort.add(id)
+  const missions = listMissions(id)
+  for (const m of missions) missionAbort.add(m.id)
+  const skills = listSkills(id)
+  const db = getDb()
+  db.exec('BEGIN')
+  try {
+    for (const m of missions) {
+      db.prepare('DELETE FROM sentinel_messages WHERE mission_id = ?').run(m.id)
+    }
+    db.prepare('DELETE FROM sentinel_missions WHERE agent_id = ?').run(id)
+    db.prepare('DELETE FROM sentinel_events WHERE agent_id = ?').run(id)
+    db.prepare('DELETE FROM sentinel_skills WHERE agent_id = ?').run(id)
+    db.prepare('DELETE FROM sentinel_agents WHERE id = ?').run(id)
+    db.exec('COMMIT')
+  } catch (err) {
+    db.exec('ROLLBACK')
+    throw err
+  }
+  deleteEmbedding('sentinel_profile', id)
+  for (const s of skills) deleteEmbedding('sentinel_skill', s.id)
 }
 
 const TOOL_SPECS: ChatToolSpec[] = [
@@ -875,7 +948,7 @@ async function execTool(
         result = readAllowedSource(strArg(args, 'path'))
         break
       case 'catalog':
-        result = JSON.stringify(catalogSnapshot(strArg(args, 'kind') || 'modules'))
+        result = catalogSnapshot(strArg(args, 'kind') || 'modules')
         break
       case 'census':
         result = JSON.stringify(censusSnapshot())
@@ -889,6 +962,10 @@ async function execTool(
             cohere_key: Boolean(
               process.env.COHERE_API_KEY?.replace(/^["']|["']$/g, ''),
             ),
+            groq_key: Boolean(
+              process.env.GROQ_API_KEY?.replace(/^["']|["']$/g, ''),
+            ),
+            sentinel_brain: getSentinelBrain(),
           })
         } else if (probe === 'entries' || probe === 'quantomos') {
           result = JSON.stringify(censusSnapshot())
@@ -914,7 +991,7 @@ async function execTool(
             `${h.score.toFixed(3)} ${hydrateHit(h.object_type, h.object_id)}`,
         )
         const graph = await searchGraphContext(q)
-        result = `hits:\n${lines.join('\n') || '(nada)'}\n\ngrafo:\n${clip(graph, 3_000)}`
+        result = `hits:\n${lines.join('\n') || '(nada — embed Cohere en pausa o sin hits)'}\n\ngrafo:\n${clip(graph, 1_200)}`
         break
       }
       case 'write_note': {
@@ -1018,28 +1095,43 @@ function missionSystem(agent: SentinelAgent, mission: SentinelMission): string {
     skills.length === 0
       ? '(ninguna todavía)'
       : skills
-          .map(
-            (s) =>
-              `- ${s.id} ${s.name}\n  in: ${s.input}\n  proc: ${s.processing}\n  out: ${s.output}`,
-          )
+          .map((s) => `- ${s.name} [${s.id.slice(0, 8)}]`)
           .join('\n')
   return [
-    loadAlma(),
+    clip(loadAlma(), 1_400),
     '',
-    `Instancia: ${agent.code} (${agent.status}).`,
+    `Instancia: ${agent.name} (${agent.code}, ${agent.status}).`,
     '',
-    '## Perfil',
-    clip(agent.profile_md || '(aún sin perfil)', 8_000),
+    '## Perfil (recorte)',
+    clip(agent.profile_md || '(aún sin perfil)', MAX_PROFILE_IN_MISSION),
     '',
-    '## Misión IPO',
-    `Intro: ${mission.intro}`,
-    `Instrucciones: ${mission.instructions}`,
-    `Recursos: ${mission.resources.join(', ') || '(catálogos + RAG)'}`,
-    `Output esperado: ${mission.expected_output || 'informe concreto con evidencia'}`,
+    '## Misión',
+    `Instrucciones: ${clip(mission.instructions, 700)}`,
+    `Output esperado: ${clip(mission.expected_output || 'informe con evidencia', 280)}`,
     '',
     '## Skills aceptadas',
     skillBlock,
+    '',
+    'Usá tools para leer código o docs. No reenvíes el harvest completo.',
   ].join('\n')
+}
+
+function compactTurns(turns: ChatToolTurn[]): ChatToolTurn[] {
+  return turns.slice(-8).map((t) => {
+    if (!('content' in t) || typeof t.content !== 'string') return t
+    return { ...t, content: clip(t.content, 1_800) }
+  })
+}
+
+function missionErrorForChat(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (isPayloadTooLargeError(err) || /TPM|request too large|413/i.test(msg)) {
+    return 'Groq rechazó el turno: el contexto superó el tope TPM (8k en GPT-OSS 120B on_demand). No es un corte de Cohere. El motor ya recorta y, si hace falta, reintenta en GPT-OSS 20B. Podés elegir 20B en Motor de Inferencia para más holgura.'
+  }
+  if (isCohereQuotaError(err)) {
+    return 'Cohere sin créditos este mes (embeddings / Mnemosyne). El chat de Sentinela usa Groq; la memoria semántica queda en pausa hasta el próximo ciclo de billing.'
+  }
+  return `Error: ${msg.slice(0, 280)}`
 }
 
 async function runMission(missionId: string): Promise<void> {
@@ -1073,8 +1165,9 @@ async function runMission(missionId: string): Promise<void> {
       if (!fresh || fresh.status === 'paused') break
       rounds += 1
       const turn = await chatWithTools({
+        role: 'sentinel',
         system,
-        messages: turns,
+        messages: compactTurns(turns),
         tools: TOOL_SPECS,
       })
       if (turn.toolCalls.length === 0) {
@@ -1133,13 +1226,12 @@ async function runMission(missionId: string): Promise<void> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    const extra = isCohereQuotaError(err) ? ' (cuota Cohere)' : ''
     const mission = getMission(missionId)
     if (mission) {
-      insertMessage(missionId, 'assistant', `Error${extra}: ${msg}`)
+      insertMessage(missionId, 'assistant', missionErrorForChat(err))
       setMissionStatus(missionId, 'error')
       setAgentStatus(mission.agent_id, 'ready')
-      logEvent(mission.agent_id, 'error', msg, missionId)
+      logEvent(mission.agent_id, 'error', msg.slice(0, 500), missionId)
     }
   } finally {
     missionAbort.delete(missionId)
@@ -1352,6 +1444,7 @@ export function agentBundle(id: string): {
   skills: SentinelSkill[]
   events: SentinelEvent[]
   messages: SentinelMessage[]
+  brain: { provider: string; model: string; label: string }
 } | null {
   const agent = getAgent(id)
   if (!agent) return null
@@ -1363,5 +1456,6 @@ export function agentBundle(id: string): {
     skills: listSkills(id),
     events: listEvents(id),
     messages: current ? listMessages(current.id) : [],
+    brain: getSentinelBrain(),
   }
 }
