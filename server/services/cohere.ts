@@ -15,7 +15,7 @@ import { getDb } from '../db.js'
 import { refinePersonKind } from './nerGuards.js'
 import { clampTitleWords } from './titleUtils.js'
 import { canCallLlm, isPayloadTooLargeError, llmChat } from './llmChat.js'
-import { resolveLlmRoute } from './appSettings.js'
+import { listVisionRoutes, resolveLlmRoute } from './appSettings.js'
 import { listNerLexicon } from './entityMatch.js'
 import {
   extractDeprocastEntities,
@@ -32,6 +32,10 @@ export { cohereAssistantMessage, parseCohereToolCalls }
 export function isCohereQuotaError(err: unknown): boolean {
   if (isPayloadTooLargeError(err)) return false
   const msg = err instanceof Error ? err.message : String(err)
+  if (/json_validate|failed_generation|Failed to validate JSON/i.test(msg)) {
+    return false
+  }
+  if (/Groq chat|Gemini chat/i.test(msg)) return false
   return (
     /Trial key/i.test(msg) ||
     /1000 API calls/i.test(msg) ||
@@ -54,17 +58,21 @@ function jpegQuality100(q: number): number {
   return q <= 1 ? Math.round(q * 100) : Math.round(q)
 }
 
-async function encodeImageForVision(absPath: string): Promise<{
+async function encodeImageForVision(
+  absPath: string,
+  opts?: { maxEdge?: number; maxBytes?: number },
+): Promise<{
   dataUrl: string
   bytes: number
   width: number
   height: number
 }> {
+  const maxEdge = opts?.maxEdge ?? 1024
+  const maxBytes = opts?.maxBytes ?? 90_000
   try {
     const { createCanvas, loadImage } =
       require('@napi-rs/canvas') as typeof import('@napi-rs/canvas')
     const img = await loadImage(absPath)
-    const maxEdge = 2048
     const scale = Math.min(1, maxEdge / Math.max(img.width, img.height, 1))
     const width = Math.max(1, Math.round(img.width * scale))
     const height = Math.max(1, Math.round(img.height * scale))
@@ -76,16 +84,17 @@ async function encodeImageForVision(absPath: string): Promise<{
     const canvasBuf = canvas as unknown as {
       toBuffer: (mime: string, quality?: number) => Buffer
     }
-    let quality = 86
+    let quality = 78
     let buf = canvasBuf.toBuffer('image/jpeg', jpegQuality100(quality))
-    while (buf.length > 3_500_000 && quality > 70) {
-      quality -= 6
+    while (buf.length > maxBytes && quality > 52) {
+      quality -= 8
       buf = canvasBuf.toBuffer('image/jpeg', jpegQuality100(quality))
     }
-    if (buf.length < 12_000 && width * height > 200_000) {
-      console.warn(
-        `[cohere/notebook-vision] JPEG sospechosamente chico (${buf.length} B a ${width}x${height}, q=${quality})`,
-      )
+    if (buf.length > maxBytes && maxEdge > 640) {
+      return encodeImageForVision(absPath, {
+        maxEdge: Math.round(maxEdge * 0.75),
+        maxBytes,
+      })
     }
     return {
       dataUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
@@ -159,7 +168,10 @@ function salvageNotebookVisionJson(raw: string): Record<string, unknown> | null 
 }
 
 function extractJsonObject(raw: string): Record<string, unknown> {
-  const cleaned = raw.replace(/```json|```/g, '').trim()
+  const cleaned = raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```json|```/g, '')
+    .trim()
   const tryParse = (s: string) => JSON.parse(s) as Record<string, unknown>
   try {
     return tryParse(cleaned)
@@ -927,57 +939,11 @@ function looksHallucinated(text: string): boolean {
   return false
 }
 
-const NOTEBOOK_VISION_PROMPT = `Analizás una foto de cuaderno manuscrito (español). Puede ser UNA hoja, una TAPA, o una foto DOBLE (apertura con dos páginas y línea/gutter divisora en el medio).
+const NOTEBOOK_VISION_PROMPT = `Transliterá el manuscrito de la foto (español). Solo lo visible. Palabra dudosa: [?]. Sin resumen ni Wikipedia.
 
-Tu ÚNICA tarea es TRANSLITERAR lo que se ve en la imagen. No interpretes, no resumas, no des clase, no inventes contexto histórico ni temas que no estén escritos.
-
-La letra puede ser irregular y la foto mediocre: igual INTENTÁ leer. Si una palabra no se ve clara, escribí tu mejor aproximación y marcá [?]. Nunca rellenes con un artículo, lección o Wikipedia.
-
-Devolvé ÚNICAMENTE JSON válido (sin markdown) con esta forma:
-{
-  "title": string (título corto 2-6 palabras tomado del texto visible; si no hay título, las primeras palabras legibles; si está en blanco, "Sin título"),
-  "transcription_spatial": string (transliteración EXACTA del manuscrito; una línea del string = una línea visual. Si es spread, usá marcadores claros:
------ IZQUIERDA -----
-...texto izq...
------ DERECHA -----
-...texto der...),
-  "graphic_elements": [
-    {
-      "type": "table" | "shape" | "connector" | "drawing" | "line",
-      "bbox": [x, y, w, h] (0-1 normalizado sobre TODA la imagen),
-      "label": string | null,
-      "table": { "rows": string[][] } | null,
-      "points": [[x,y], ...] | null
-    }
-  ],
-  "is_blank": boolean,
-  "meta": {
-    "layout": "single" | "spread" | "cover" | "unknown",
-    "notes": string (solo calidad de foto: orientación, sombra, gutter, recorte; SIN interpretar el contenido),
-    "orientation_hint": 0 | 90 | 180 | 270,
-    "page_bbox": [x, y, w, h] | null (bbox de la región útil de PAPEL a maximizar; excluí mesa/fondos),
-    "spread": null | {
-      "divider_x": number (0-1, posición horizontal del gutter/línea divisora),
-      "left_bbox": [x, y, w, h],
-      "right_bbox": [x, y, w, h],
-      "left_title": string | null,
-      "right_title": string | null,
-      "left_transcription": string | null,
-      "right_transcription": string | null
-    }
-  }
-}
-Reglas:
-- Detectá SIEMPRE si la foto muestra dos páginas abiertas (spread). Si hay línea vertical/gutter en el centro o dos bloques de texto lado a lado → layout="spread" y completá meta.spread.
-- En spread: transcribí IZQUIERDA y DERECHA por separado (en transcription_spatial con marcadores Y en meta.spread.*_transcription).
-- page_bbox debe enmarcar el papel útil (no la mesa). Si es spread, page_bbox puede ser el cuaderno entero abierto.
-- orientation_hint: rotación para que el texto quede derecho (0 si ya está).
-- Preservá saltos de línea y ubicación; no “corrijas” ortografía salvo ilegibilidad ([?]).
-- Copiá letras, números romanos, títulos y listas TAL CUAL. Prohibido rellenar con prosa genérica (“esta es una página de notas…”, resúmenes de guerras, “hoy hablaremos de…”).
-- Si hay poco texto o casi vacío: transcribí solo lo visible (aunque sea una palabra al margen). is_blank=true solo si no hay tinta útil (ni títulos, ni números, ni tachaduras).
-- Incluí tablas, formas, conectores, dibujos y líneas en graphic_elements (descripción mínima del dibujo, no un ensayo).
-- Tapa lisa sin texto interior → layout="cover"; igual proponé título si hay etiqueta/marca.
-- Responde solo JSON.`
+JSON único (sin markdown, sin <think>):
+{"title":"2-6 palabras del texto","transcription_spatial":"una línea visual = una línea","graphic_elements":[{"type":"table|shape|connector|drawing|line","bbox":[x,y,w,h],"label":null,"table":null,"points":null}],"is_blank":false,"meta":{"layout":"single|spread|cover|unknown","notes":"foto","orientation_hint":0,"page_bbox":[x,y,w,h],"spread":null}}
+bbox 0-1. Spread si hay dos páginas: layout=spread y transcription con ----- IZQUIERDA ----- / ----- DERECHA -----. Tapa → layout=cover.`
 
 function normalizeBBox(
   v: unknown,
@@ -1045,14 +1011,19 @@ function normalizeVisionMeta(
 export async function analyzeNotebookPage(
   imageAbsPath: string,
 ): Promise<import('../types.js').NotebookPageVisionResult> {
-  if (!canCallLlm('vision')) {
-    throw new Error('Falta API key del proveedor de visión en .env')
+  if (!canCallLlm('vision') && listVisionRoutes().length === 0) {
+    throw new Error(
+      'Falta API key de visión (GROQ_API_KEY, OPENROUTER_API_KEY o COHERE_API_KEY) en .env',
+    )
   }
   if (!fs.existsSync(imageAbsPath)) {
     throw new Error(`Imagen no encontrada: ${imageAbsPath}`)
   }
 
-  const encoded = await encodeImageForVision(imageAbsPath)
+  const encoded = await encodeImageForVision(imageAbsPath, {
+    maxEdge: 1024,
+    maxBytes: 80_000,
+  })
   console.log(
     `[cohere/notebook-vision] ${path.basename(imageAbsPath)} → ${encoded.width}x${encoded.height} jpeg ${(encoded.bytes / 1024).toFixed(0)} KB`,
   )
@@ -1130,7 +1101,7 @@ export async function analyzeNotebookPage(
       return extractJsonObject(raw)
     } catch (parseErr) {
       console.warn('[cohere/notebook-vision] JSON inválido, reintento:', parseErr)
-      data = await callWithRetry(prompt, !preferJson)
+      data = await callWithRetry(prompt, false)
       raw = data.text
       return extractJsonObject(raw)
     }

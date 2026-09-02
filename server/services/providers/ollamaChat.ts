@@ -82,6 +82,21 @@ function contentToText(content: OrMessage['content'] | undefined): string {
   return ''
 }
 
+function imagesFromContent(content: OrMessage['content'] | undefined): string[] {
+  if (!Array.isArray(content)) return []
+  const out: string[] = []
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue
+    if (!('image_url' in part)) continue
+    const url = String(
+      (part as { image_url?: { url?: string } }).image_url?.url ?? '',
+    )
+    const m = url.match(/^data:[^;]+;base64,(.+)$/s)
+    if (m?.[1]) out.push(m[1])
+  }
+  return out
+}
+
 function toOllamaMessages(messages: OrMessage[]): Array<Record<string, unknown>> {
   return messages.map((m) => {
     if (m.role === 'tool') {
@@ -97,6 +112,8 @@ function toOllamaMessages(messages: OrMessage[]): Array<Record<string, unknown>>
       role: m.role,
       content: contentToText(m.content),
     }
+    const images = imagesFromContent(m.content)
+    if (images.length) row.images = images
     if ('tool_calls' in m && m.tool_calls) {
       row.tool_calls = m.tool_calls
     }

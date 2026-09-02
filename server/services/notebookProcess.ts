@@ -18,6 +18,7 @@ import {
 } from './blobIngest.js'
 import { row } from '../sql.js'
 import { waitWhile } from './wait.js'
+import { envNumber } from '../config.js'
 
 export function parseMentionedEntities(raw: unknown): BlobTag[] {
   let parsed: unknown = raw
@@ -102,6 +103,37 @@ function pageHasVisionContent(page: {
   return false
 }
 
+function visionMetaError(page: { vision_meta?: string | null }): string | null {
+  try {
+    const meta = JSON.parse(page.vision_meta || '{}') as { error?: unknown }
+    const err = meta.error != null ? String(meta.error).trim() : ''
+    return err || null
+  } catch {
+    return null
+  }
+}
+
+/** true = ya hay transcripción usable; no volver a mandar a visión en «Procesar todo». */
+export function shouldSkipNotebookVision(page: {
+  image_path?: string | null
+  status?: string | null
+  is_blank?: number | boolean | null
+  title?: string | null
+  transcription_spatial?: string | null
+  graphic_elements?: string | null
+  vision_meta?: string | null
+}): boolean {
+  if (!page.image_path) return true
+  if (visionMetaError(page)) return false
+  if (page.status === 'Validada' || page.status === 'Procesada') return true
+  if (page.status === 'Vacia') return true
+  if (page.status === 'PendienteValidacion' && pageHasVisionContent(page)) {
+    return true
+  }
+  if (pageHasVisionContent(page)) return true
+  return false
+}
+
 export const EXPLANATION_SEPARATOR = '____________________'
 
 export function splitExplanation(
@@ -175,7 +207,11 @@ function pageHasAiExplanation(page: {
   return splitExplanation(page.explanation, page.explanation_user).ai.length > 0
 }
 
-type VisionJob = { notebookId: string; slotIndex: number }
+type VisionJob = {
+  notebookId: string
+  slotIndex: number
+  skipIfDone?: boolean
+}
 type ProcessLog = {
   ts: string
   level: 'info' | 'warn' | 'error'
@@ -187,6 +223,7 @@ type ProcessLog = {
 const visionQueue: VisionJob[] = []
 let visionRunning = false
 let visionActive: VisionJob | null = null
+let lastVisionCallAt = 0
 
 const confirmQueue: VisionJob[] = []
 let confirmRunning = false
@@ -245,6 +282,7 @@ function pushLog(
 export function enqueueNotebookVision(
   notebookId: string,
   slotIndex: number,
+  opts?: { skipIfDone?: boolean },
 ): void {
   if (notebookPaused) return
   if (
@@ -254,7 +292,11 @@ export function enqueueNotebookVision(
   ) {
     return
   }
-  visionQueue.push({ notebookId, slotIndex })
+  visionQueue.push({
+    notebookId,
+    slotIndex,
+    skipIfDone: opts?.skipIfDone,
+  })
   void drainVisionQueue()
 }
 
@@ -425,16 +467,12 @@ export function enqueueNotebookFullRead(notebookId: string): {
   let skipped = 0
 
   for (const page of pages) {
-    if (!page.image_path) {
-      skipped++
-      continue
-    }
-    if (page.status === 'Procesada' || page.status === 'Validada') {
+    if (shouldSkipNotebookVision(page)) {
       skipped++
       continue
     }
 
-    enqueueNotebookVision(notebookId, page.slot_index)
+    enqueueNotebookVision(notebookId, page.slot_index, { skipIfDone: true })
     visionQueued++
   }
 
@@ -454,32 +492,61 @@ export function enqueueNotebookFullRead(notebookId: string): {
 async function drainVisionQueue(): Promise<void> {
   if (visionRunning) return
   visionRunning = true
+  const workers = Math.min(
+    2,
+    Math.max(1, envNumber('VISION_CONCURRENCY', 1)),
+  )
   try {
-    while (visionQueue.length > 0) {
-      if (notebookPaused) {
-        visionQueue.length = 0
-        break
-      }
-      const job = visionQueue.shift()!
-      visionActive = job
-      try {
-        await runVisionForPage(job.notebookId, job.slotIndex)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        pushLog('error', msg, job.notebookId, job.slotIndex)
-        persistVisionError(job.notebookId, job.slotIndex, msg)
-        if (isCohereQuotaError(err)) {
-          haltVisionQueue(
-            'Cuota de Cohere (Trial / 1000 llamadas). Cambiá a Production key, reiniciá el server y volvé a Procesar cuaderno.',
-          )
-          break
-        }
-      } finally {
-        visionActive = null
-      }
-    }
+    await Promise.all(
+      Array.from({ length: workers }, () => runVisionWorker()),
+    )
   } finally {
     visionRunning = false
+    if (visionQueue.length > 0 && !notebookPaused) {
+      void drainVisionQueue()
+    }
+  }
+}
+
+async function runVisionWorker(): Promise<void> {
+  while (visionQueue.length > 0) {
+    if (notebookPaused) {
+      visionQueue.length = 0
+      break
+    }
+    const job = visionQueue.shift()
+    if (!job) break
+    visionActive = job
+    try {
+      await runVisionForPage(job.notebookId, job.slotIndex, {
+        skipIfDone: job.skipIfDone,
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      pushLog('error', msg, job.notebookId, job.slotIndex)
+      persistVisionError(job.notebookId, job.slotIndex, msg)
+      if (isCohereQuotaError(err)) {
+        haltVisionQueue(
+          'Cuota de Cohere (Trial / 1000 llamadas). Cambiá a Production key, reiniciá el server y volvé a Procesar cuaderno.',
+        )
+        break
+      }
+      if (/No hay backend de visión usable|Falta API key de visión/i.test(msg)) {
+        if (
+          /json_validate|Failed to validate JSON|failed_generation|413|429|quota|TPM|tokens per minute/i.test(
+            msg,
+          )
+        ) {
+          continue
+        }
+        haltVisionQueue(
+          'Sin proveedor de visión. Agregá GEMINI_API_KEY (recomendado) o GROQ_API_KEY en .env y reiniciá npm run dev.',
+        )
+        break
+      }
+    } finally {
+      visionActive = null
+    }
   }
 }
 
@@ -515,6 +582,7 @@ function haltVisionQueue(reason: string): void {
 async function runVisionForPage(
   notebookId: string,
   slotIndex: number,
+  opts?: { skipIfDone?: boolean },
 ): Promise<void> {
   const db = getDb()
   const page = getPage(db, notebookId, slotIndex)
@@ -522,11 +590,22 @@ async function runVisionForPage(
     pushLog('warn', 'Sin imagen, se omite', notebookId, slotIndex)
     return
   }
+  if (opts?.skipIfDone && shouldSkipNotebookVision(page)) {
+    pushLog('info', 'Ya transcrita, se omite', notebookId, slotIndex)
+    return
+  }
 
   const abs = path.resolve(process.cwd(), page.image_path)
   if (!fs.existsSync(abs)) {
     throw new Error(`Archivo de imagen ausente: ${abs}`)
   }
+
+  const pause = envNumber('VISION_REQUEST_DELAY_MS', 3000)
+  if (lastVisionCallAt > 0 && pause > 0) {
+    const wait = pause - (Date.now() - lastVisionCallAt)
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+  }
+  lastVisionCallAt = Date.now()
 
   pushLog('info', 'Enviando hoja a visión…', notebookId, slotIndex)
   db.prepare(

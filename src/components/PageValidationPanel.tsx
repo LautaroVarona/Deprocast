@@ -549,6 +549,10 @@ export function PageValidationPanel({
     if (pane === 'entidades' && mentionOpen) syncMentionAnchor()
   }, [entityNote, pane, mentionOpen, syncMentionAnchor])
 
+  useEffect(() => {
+    setImageBroken(false)
+  }, [slot, imgTick, page?.image_path])
+
   const paneValue =
     pane === 'transcripcion'
       ? transcription
@@ -587,10 +591,6 @@ export function PageValidationPanel({
   }
 
   const imageUrl = `${api.notebookPageImageUrl(notebook.id, slot)}?v=${imgTick}`
-
-  useEffect(() => {
-    setImageBroken(false)
-  }, [slot, imgTick, page?.image_path])
 
   return (
     <section className="nb-section nb-validate is-fit">

@@ -4,6 +4,7 @@
  */
 import {
   canCallLlm,
+  listVisionRoutes,
   resolveLlmRoute,
   type LlmRole,
 } from './appSettings.js'
@@ -14,6 +15,7 @@ import {
   type CohereToolCall,
   type CohereToolSpec,
 } from './providers/cohereChat.js'
+import { geminiChat } from './providers/geminiChat.js'
 import { groqChat } from './providers/groqChat.js'
 import {
   ollamaChat,
@@ -140,6 +142,37 @@ export async function llmChat(opts: {
     provider: string
     model: string
   }> => {
+    if (opts.role === 'vision') {
+      const routes = listVisionRoutes()
+      const chain = routes.length > 0 ? routes : [route]
+      let lastErr: unknown
+      let geminiQuota = false
+      for (const candidate of chain) {
+        if (geminiQuota && candidate.provider === 'gemini') continue
+        try {
+          const result = await dispatchLlm(candidate, opts)
+          if (candidate.provider !== route.provider) {
+            console.warn(
+              `[llm] visión ${route.provider} → ${candidate.provider} (${candidate.model})`,
+            )
+          }
+          return result
+        } catch (err) {
+          lastErr = err
+          const status = (err as Error & { status?: number }).status
+          const msg = err instanceof Error ? err.message : String(err)
+          console.warn(
+            `[llm] visión ${candidate.provider}/${candidate.model} falló: ${msg.slice(0, 180)}`,
+          )
+          if (candidate.provider === 'gemini' && status === 429) {
+            geminiQuota = true
+          }
+        }
+      }
+      throw lastErr instanceof Error
+        ? lastErr
+        : new Error('Ningún proveedor de visión respondió')
+    }
     try {
       return await dispatchLlm(route, opts)
     } catch (err) {
@@ -213,7 +246,11 @@ export async function llmChat(opts: {
     }
   }
 
-  if (route.provider === 'groq' || route.provider === 'ollama') {
+  if (
+    opts.role === 'vision' ||
+    route.provider === 'groq' ||
+    route.provider === 'ollama'
+  ) {
     return enqueueLlm(run)
   }
 
@@ -244,7 +281,9 @@ async function dispatchLlm(
         ? 'OPENROUTER_API_KEY'
         : route.provider === 'groq'
           ? 'GROQ_API_KEY'
-          : 'COHERE_API_KEY'
+          : route.provider === 'gemini'
+            ? 'GEMINI_API_KEY'
+            : 'COHERE_API_KEY'
     throw new Error(`Falta ${keyName} en .env (proveedor ${route.provider})`)
   }
 
@@ -263,6 +302,25 @@ async function dispatchLlm(
       raw: result.raw,
       rawAssistant,
       provider: 'ollama',
+      model: route.model,
+    }
+  }
+
+  if (route.provider === 'gemini') {
+    const result = await geminiChat({
+      apiKey: route.apiKey,
+      model: route.model,
+      messages: opts.messages as OrMessage[],
+      temperature: opts.temperature,
+      tools: opts.tools as OrToolSpec[] | undefined,
+      responseFormat: opts.responseFormat ?? { type: 'json_object' },
+    })
+    return {
+      text: result.text,
+      toolCalls: result.toolCalls,
+      raw: result.raw,
+      rawAssistant: result.raw,
+      provider: 'gemini',
       model: route.model,
     }
   }

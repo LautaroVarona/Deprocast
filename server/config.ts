@@ -19,8 +19,11 @@ export const ENV_SPECS: EnvSpec[] = [
   { key: 'LOCAL_API_TOKEN', kind: 'optional', description: 'Token de capacidad local. Si falta, se genera en data/local-token.', secret: true },
   { key: 'DEEPGRAM_API_KEY', kind: 'optional', description: 'STT Deepgram', secret: true },
   { key: 'COHERE_API_KEY', kind: 'optional', description: 'LLM/embed Cohere', secret: true },
-  { key: 'GROQ_API_KEY', kind: 'optional', description: 'LLM Groq (ENR / extracts)', secret: true },
-  { key: 'LLM_QUEUE_DELAY_MS', kind: 'optional', default: '800', description: 'Delay entre peticiones LLM (anti-429)', min: 0, max: 60_000, integer: true },
+  { key: 'GEMINI_API_KEY', kind: 'optional', description: 'Gemini visión / OCR', secret: true },
+  { key: 'VISION_REQUEST_DELAY_MS', kind: 'optional', default: '3000', description: 'Pausa entre hojas de visión (anti-429)', min: 0, max: 120_000, integer: true },
+  { key: 'VISION_CONCURRENCY', kind: 'optional', default: '1', description: 'Hojas de visión en paralelo (1–2)', min: 1, max: 2, integer: true },
+  { key: 'VISION_429_RETRIES', kind: 'optional', default: '4', description: 'Reintentos LLM ante 429 antes de OCR local', min: 0, max: 8, integer: true },
+  { key: 'VISION_BACKOFF_BASE_MS', kind: 'optional', default: '2000', description: 'Base del backoff exponencial 429', min: 200, max: 60_000, integer: true },
   { key: 'OLLAMA_URL', kind: 'optional', default: 'http://localhost:11434', description: 'Fallback local Ollama' },
   { key: 'OLLAMA_MODEL', kind: 'optional', default: 'llama3', description: 'Modelo Ollama de fallback (debe estar en `ollama list`)' },
   { key: 'OPENROUTER_API_KEY', kind: 'optional', description: 'LLM OpenRouter', secret: true },
@@ -84,6 +87,7 @@ export function validateEnv(): { ok: true } | { ok: false; errors: string[] } {
 
 export function capabilities(): Record<string, boolean> {
   return {
+    gemini: envConfigured('GEMINI_API_KEY') || envConfigured('GOOGLE_API_KEY'),
     groq: envConfigured('GROQ_API_KEY'),
     cohere: envConfigured('COHERE_API_KEY'),
     openrouter: envConfigured('OPENROUTER_API_KEY'),

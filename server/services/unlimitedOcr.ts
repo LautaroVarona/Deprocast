@@ -12,9 +12,11 @@ function env(key: string, fallback = ''): string {
 
 export type OcrImageMode = 'gundam' | 'base'
 
-export function ocrBackend(): 'auto' | 'unlimited' | 'cohere' {
+export function ocrBackend(): 'auto' | 'unlimited' | 'cohere' | 'local' | 'gemini' {
   const raw = env('NOTEBOOK_OCR_BACKEND', 'auto').toLowerCase()
-  if (raw === 'unlimited' || raw === 'cohere') return raw
+  if (raw === 'unlimited' || raw === 'cohere' || raw === 'local' || raw === 'gemini') {
+    return raw
+  }
   return 'auto'
 }
 
