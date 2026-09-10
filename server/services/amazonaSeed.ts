@@ -609,6 +609,7 @@ export function seedAmazona(db: DatabaseSync): void {
   })
 
   seedIdaMatrix(db, now)
+  seedConocimientoGeometry(db, now)
 }
 
 function seedIdaMatrix(db: DatabaseSync, now: string): void {
@@ -744,6 +745,216 @@ function seedIdaMatrix(db: DatabaseSync, now: string): void {
     rowListId: 'ama-lista6-ida-proceso',
     colListId: 'ama-lista6-ida-dominio',
     tags: ['ida'],
+    now,
+  })
+}
+
+function seedConocimientoGeometry(db: DatabaseSync, now: string): void {
+  insertList(db, {
+    id: 'ama-tridente-conocimiento-fuente-tech',
+    title: 'Fuente técnica',
+    notes: 'Repo, paper, dataset/tool: artefactos del mundo técnico.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'fuente'],
+    now,
+    items: [
+      {
+        id: 'ama-item-conocimiento-repo',
+        label: 'Repo',
+        notes: 'Repositorio GitHub u homólogo. Radiografía de stack y pulso.',
+      },
+      {
+        id: 'ama-item-conocimiento-paper',
+        label: 'Paper',
+        notes: 'Artículo académico. DOI, autores, abstract. Contrato V2.',
+      },
+      {
+        id: 'ama-item-conocimiento-dataset',
+        label: 'Dataset / tool',
+        notes: 'Corpus, modelo, CLI o herramienta suelta.',
+      },
+    ],
+  })
+
+  insertList(db, {
+    id: 'ama-tridente-conocimiento-fuente-inst',
+    title: 'Fuente institucional',
+    notes: 'Ley, libro, curriculum: el saber con sello o programa.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'fuente'],
+    now,
+    items: [
+      {
+        id: 'ama-item-conocimiento-ley',
+        label: 'Ley',
+        notes: 'Norma: jurisdicción, boletín, artículos. Contrato V2.',
+      },
+      {
+        id: 'ama-item-conocimiento-libro',
+        label: 'Libro',
+        notes: 'Obra larga. ISBN y año. Contrato V2.',
+      },
+      {
+        id: 'ama-item-conocimiento-curriculum',
+        label: 'Curriculum',
+        notes: 'Nodo del mapa de aprender, no un artículo de Wikipedia.',
+      },
+    ],
+  })
+
+  insertComposedLista6(db, {
+    id: 'ama-lista6-conocimiento-fuentes',
+    title: 'Fuentes (técnico | institucional)',
+    notes: 'Eje Y de la matriz de captura. Qué clase de referente es.',
+    tags: ['conocimiento', 'fuentes'],
+    tridenteA: 'ama-tridente-conocimiento-fuente-tech',
+    tridenteB: 'ama-tridente-conocimiento-fuente-inst',
+    now,
+  })
+
+  insertList(db, {
+    id: 'ama-tridente-conocimiento-util-tech',
+    title: 'Radiografía',
+    notes: 'Stack/método, pulso/vigencia, arquitectura.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'utilidad'],
+    now,
+    items: [
+      {
+        id: 'ama-item-conocimiento-stack',
+        label: 'Stack / método',
+        notes: 'Dependencias y señales (Next, Tailwind, FFmpeg, Whisper…).',
+      },
+      {
+        id: 'ama-item-conocimiento-pulso',
+        label: 'Pulso / vigencia',
+        notes: 'Último commit, issues abiertos, archivado.',
+      },
+      {
+        id: 'ama-item-conocimiento-arquitectura',
+        label: 'Arquitectura',
+        notes: 'TL;DR del README sin badges: cómo está hecho.',
+      },
+    ],
+  })
+
+  insertList(db, {
+    id: 'ama-tridente-conocimiento-util-sentido',
+    title: 'Sentido',
+    notes: 'Problema que resuelve, casos de uso, cruce con tu mapa.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'utilidad'],
+    now,
+    items: [
+      {
+        id: 'ama-item-conocimiento-problema',
+        label: 'Problema que resuelve',
+        notes: 'Vector de utilidad: por qué existe este referente.',
+      },
+      {
+        id: 'ama-item-conocimiento-casos',
+        label: 'Casos de uso',
+        notes: 'Para qué lo usarías vos, no el marketing del README.',
+      },
+      {
+        id: 'ama-item-conocimiento-cruce',
+        label: 'Cruce',
+        notes: 'A qué disciplina o proyecto tuyo apunta.',
+      },
+    ],
+  })
+
+  insertComposedLista6(db, {
+    id: 'ama-lista6-conocimiento-vectores',
+    title: 'Vectores de utilidad (radiografía | sentido)',
+    notes: 'Eje X de la matriz de captura. Qué hay que extraer.',
+    tags: ['conocimiento', 'vectores'],
+    tridenteA: 'ama-tridente-conocimiento-util-tech',
+    tridenteB: 'ama-tridente-conocimiento-util-sentido',
+    now,
+  })
+
+  insertMatrix(db, {
+    id: 'ama-matrix-conocimiento',
+    title: 'Captura de referentes',
+    notes:
+      'Fuentes × vectores de utilidad. GitHub V1 llena la fila Repo; el resto es contrato.',
+    rowListId: 'ama-lista6-conocimiento-fuentes',
+    colListId: 'ama-lista6-conocimiento-vectores',
+    tags: ['conocimiento'],
+    now,
+  })
+
+  insertList(db, {
+    id: 'ama-tridente-saber-naturaleza',
+    title: 'Saber · naturaleza',
+    notes: 'Matemática, física/ondas, biología. El mundo que no es trato.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'saber'],
+    now,
+    items: [
+      {
+        id: 'ama-item-saber-matematica',
+        label: 'Matemática',
+        notes: 'Estructuras, prueba, cantidad.',
+      },
+      {
+        id: 'ama-item-saber-fisica',
+        label: 'Física / ondas',
+        notes: 'Electromagnetismo, acústica, resonancia.',
+      },
+      {
+        id: 'ama-item-saber-biologia',
+        label: 'Biología',
+        notes: 'Vivo, cuerpo, ecosistemas.',
+      },
+    ],
+  })
+
+  insertList(db, {
+    id: 'ama-tridente-saber-cultura',
+    title: 'Saber · cultura',
+    notes: 'Humanidades, norma, organización/sistemas.',
+    kind: 'tridente',
+    tags: ['conocimiento', 'saber'],
+    now,
+    items: [
+      {
+        id: 'ama-item-saber-humanidades',
+        label: 'Humanidades',
+        notes: 'Historia, lengua, arte, relato.',
+      },
+      {
+        id: 'ama-item-saber-norma',
+        label: 'Norma',
+        notes: 'Derecho, fiscalidad, fuero, plazos.',
+      },
+      {
+        id: 'ama-item-saber-organizacion',
+        label: 'Organización / sistemas',
+        notes: 'Arquitectura de información, instituciones, bucles.',
+      },
+    ],
+  })
+
+  insertComposedLista6(db, {
+    id: 'ama-lista6-conocimiento-saber',
+    title: 'Mapa de saber (naturaleza | cultura)',
+    notes: 'Ejes del curriculum. No es Wikipedia: es el tablero de cruces.',
+    tags: ['conocimiento', 'saber'],
+    tridenteA: 'ama-tridente-saber-naturaleza',
+    tridenteB: 'ama-tridente-saber-cultura',
+    now,
+  })
+
+  insertMatrix(db, {
+    id: 'ama-matrix-intersecciones',
+    title: 'Intersecciones radicales',
+    notes:
+      'Saber × saber. Las celdas son hipótesis de cruce (p. ej. física × organización). V1 siembra el tablero vacío.',
+    rowListId: 'ama-lista6-conocimiento-saber',
+    colListId: 'ama-lista6-conocimiento-saber',
+    tags: ['conocimiento', 'intersecciones'],
     now,
   })
 }

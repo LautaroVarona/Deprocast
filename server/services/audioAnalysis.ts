@@ -16,6 +16,11 @@ export type AudioAnalysisPayload = {
   duration_sec: number | null
   analyzed_at: string
   enhanced_available?: boolean
+  sterile_available?: boolean
+  sterile_before_stt?: boolean
+  concat_speech?: boolean
+  filters?: string
+  sterile_path?: string
 }
 
 function env(key: string, fallback: string): string {
@@ -37,6 +42,16 @@ export function silenceDetectOpts(): { noiseDb: number; minSec: number } {
 
 export function enhanceOnIngest(): boolean {
   return env('AUDIO_ENHANCE_ON_INGEST', '0') === '1'
+}
+
+/** F1: cascada física antes del STT. Default on; sin ffmpeg se ignora. */
+export function sterileBeforeStt(): boolean {
+  return env('AUDIO_STERILE_BEFORE_STT', '1') !== '0'
+}
+
+/** Concat de speech_regions. Off por defecto: desincroniza timestamps de criba. */
+export function concatSpeechBeforeStt(): boolean {
+  return env('AUDIO_CONCAT_SPEECH_BEFORE_STT', '0') === '1'
 }
 
 function runCmd(
@@ -238,8 +253,156 @@ export function enhancedAudioPath(entryVaultPath: string): string {
   return path.join(path.dirname(abs), 'enhanced.m4a')
 }
 
-const ENHANCE_FILTER =
+export function sterileAudioPath(entryVaultPath: string): string {
+  const abs = path.resolve(process.cwd(), entryVaultPath)
+  return path.join(path.dirname(abs), 'sterile.m4a')
+}
+
+export const ENHANCE_FILTER =
   'highpass=f=80,afftdn=nf=-25,acompressor=threshold=-18dB:ratio=3:attack=5:release=50,loudnorm=I=-16:TP=-1.5'
+
+const MAX_CONCAT_REGIONS = 40
+
+export function shouldConcatSpeech(
+  regions: TimeRegion[],
+  durationSec: number | null,
+): boolean {
+  if (regions.length === 0) return false
+  const speech = regions.reduce((acc, r) => acc + Math.max(0, r.end - r.start), 0)
+  if (speech < 1) return false
+  if (durationSec && durationSec > 0 && speech / durationSec > 0.92) return false
+  return true
+}
+
+export function buildSpeechConcatFilter(regions: TimeRegion[]): string | null {
+  const clipped = regions
+    .filter((r) => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end > r.start)
+    .slice(0, MAX_CONCAT_REGIONS)
+  if (clipped.length === 0) return null
+  if (clipped.length === 1) {
+    const r = clipped[0]!
+    return `[0:a]atrim=start=${r.start}:end=${r.end},asetpts=PTS-STARTPTS[out]`
+  }
+  const parts: string[] = []
+  const labels: string[] = []
+  clipped.forEach((r, i) => {
+    const lab = `a${i}`
+    parts.push(
+      `[0:a]atrim=start=${r.start}:end=${r.end},asetpts=PTS-STARTPTS[${lab}]`,
+    )
+    labels.push(`[${lab}]`)
+  })
+  parts.push(`${labels.join('')}concat=n=${clipped.length}:v=0:a=1[out]`)
+  return parts.join(';')
+}
+
+export async function concatSpeechRegions(
+  absPath: string,
+  regions: TimeRegion[],
+  outPath: string,
+): Promise<boolean> {
+  const filter = buildSpeechConcatFilter(regions)
+  if (!filter) return false
+  const ffmpeg = await whichFfmpeg()
+  if (!ffmpeg) return false
+  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+  const cwd = path.isAbsolute(ffmpeg) ? path.dirname(ffmpeg) : undefined
+  try {
+    const r = await runCmd(
+      ffmpeg,
+      [
+        '-y',
+        '-i',
+        absPath,
+        '-filter_complex',
+        filter,
+        '-map',
+        '[out]',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        outPath,
+      ],
+      { timeoutMs: 900_000, cwd },
+    )
+    if (r.code !== 0 || !fs.existsSync(outPath)) {
+      console.warn('[audio-analysis] concat speech failed:', r.stderr.slice(0, 400))
+      return false
+    }
+    return true
+  } catch (err) {
+    console.warn('[audio-analysis] concat speech error:', err)
+    return false
+  }
+}
+
+export type SterilizeResult = {
+  sttPath: string
+  analysisPatch: Partial<AudioAnalysisPayload>
+}
+
+export async function sterilizeAudioForStt(
+  absPath: string,
+  entryVaultPath: string,
+): Promise<SterilizeResult> {
+  const empty: SterilizeResult = {
+    sttPath: absPath,
+    analysisPatch: { sterile_before_stt: false },
+  }
+  if (!sterileBeforeStt()) return empty
+  const ffmpeg = await whichFfmpeg()
+  if (!ffmpeg) {
+    console.warn('[audio-analysis] F1 omitido: no hay ffmpeg')
+    return empty
+  }
+
+  const pre = await analyzeAudioSilence(absPath)
+  let sourceForEnhance = absPath
+  let concat = false
+  if (
+    concatSpeechBeforeStt() &&
+    pre &&
+    shouldConcatSpeech(pre.speech_regions, pre.duration_sec)
+  ) {
+    const concatOut = path.join(path.dirname(absPath), 'speech_concat.m4a')
+    const okConcat = await concatSpeechRegions(
+      absPath,
+      pre.speech_regions,
+      concatOut,
+    )
+    if (okConcat) {
+      sourceForEnhance = concatOut
+      concat = true
+    }
+  }
+
+  const enhancedOut = enhancedAudioPath(entryVaultPath)
+  const okEnh = await enhanceAudio(sourceForEnhance, enhancedOut)
+  const patch: Partial<AudioAnalysisPayload> = {
+    sterile_before_stt: true,
+    concat_speech: concat,
+    filters: ENHANCE_FILTER,
+    enhanced_available: okEnh,
+  }
+
+  if (concat && okEnh) {
+    const sterileOut = sterileAudioPath(entryVaultPath)
+    try {
+      fs.copyFileSync(enhancedOut, sterileOut)
+      patch.sterile_available = true
+      patch.sterile_path = path
+        .relative(process.cwd(), sterileOut)
+        .split(path.sep)
+        .join('/')
+    } catch (err) {
+      console.warn('[audio-analysis] copy sterile:', err)
+    }
+  }
+
+  const sttPath = okEnh ? enhancedOut : sourceForEnhance
+  return { sttPath, analysisPatch: patch }
+}
 
 export async function enhanceAudio(
   absPath: string,

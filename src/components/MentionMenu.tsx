@@ -15,6 +15,81 @@ export type MentionMenuHit = {
   subtitle: string
 }
 
+export function mentionHitKey(
+  hit: Pick<MentionMenuHit, 'kind' | 'entity_id'>,
+): string {
+  return `${hit.kind}:${hit.entity_id}`
+}
+
+export function isMentionTagged(
+  hit: Pick<MentionMenuHit, 'kind' | 'entity_id'>,
+  taggedIds?: Set<string>,
+): boolean {
+  return Boolean(taggedIds?.has(mentionHitKey(hit)))
+}
+
+export function orderTaggedLast<T>(
+  items: T[],
+  isTagged: (item: T) => boolean,
+): T[] {
+  const fresh: T[] = []
+  const tagged: T[] = []
+  for (const item of items) {
+    if (isTagged(item)) tagged.push(item)
+    else fresh.push(item)
+  }
+  return [...fresh, ...tagged]
+}
+
+export function stepSelectableIdx<T>(
+  items: T[],
+  current: number,
+  dir: 1 | -1,
+  isTagged: (item: T) => boolean,
+): number {
+  if (items.length === 0) return 0
+  const selectable = items
+    .map((_, i) => i)
+    .filter((i) => !isTagged(items[i]!))
+  if (selectable.length === 0) return current
+  const pos = selectable.indexOf(current)
+  if (pos < 0) {
+    if (dir === 1) {
+      return selectable.find((i) => i > current) ?? selectable[0]!
+    }
+    const before = selectable.filter((i) => i < current)
+    return before[before.length - 1] ?? selectable[selectable.length - 1]!
+  }
+  return selectable[(pos + dir + selectable.length) % selectable.length]!
+}
+
+export function orderMentionHits(
+  hits: MentionMenuHit[],
+  taggedIds?: Set<string>,
+): MentionMenuHit[] {
+  if (!taggedIds?.size) return hits
+  return orderTaggedLast(hits, (hit) => isMentionTagged(hit, taggedIds))
+}
+
+export function firstSelectableMentionIdx(
+  hits: MentionMenuHit[],
+  taggedIds?: Set<string>,
+): number {
+  const i = hits.findIndex((h) => !isMentionTagged(h, taggedIds))
+  return i >= 0 ? i : 0
+}
+
+export function stepSelectableMentionIdx(
+  hits: MentionMenuHit[],
+  current: number,
+  dir: 1 | -1,
+  taggedIds?: Set<string>,
+): number {
+  return stepSelectableIdx(hits, current, dir, (hit) =>
+    isMentionTagged(hit, taggedIds),
+  )
+}
+
 export function mentionKindLabel(kind: MentionKind): string {
   if (kind === 'agrupacion') return 'Grupo'
   if (kind === 'project') return 'Proyecto'
@@ -67,6 +142,10 @@ export function MentionMenu({
     () => (anchor ? menuStyle(anchor) : undefined),
     [anchor],
   )
+  const orderedHits = useMemo(
+    () => orderMentionHits(hits, taggedIds),
+    [hits, taggedIds],
+  )
 
   useEffect(() => {
     if (!open) return
@@ -88,26 +167,31 @@ export function MentionMenu({
         <span className="mention-pop-title">Etiquetar</span>
         <span className="mention-pop-hint">Ctrl suma otra</span>
       </header>
-      {busy && hits.length === 0 && (
+      {busy && orderedHits.length === 0 && (
         <p className="muted mention-pop-empty">Buscando…</p>
       )}
-      {!busy && hits.length === 0 && (
+      {!busy && orderedHits.length === 0 && (
         <p className="muted mention-pop-empty">Sin coincidencias</p>
       )}
-      {hits.map((hit, i) => {
-        const tagged = taggedIds?.has(`${hit.kind}:${hit.entity_id}`)
+      {orderedHits.map((hit, i) => {
+        const tagged = isMentionTagged(hit, taggedIds)
         return (
           <button
-            key={`${hit.kind}:${hit.entity_id}`}
+            key={mentionHitKey(hit)}
             type="button"
             role="option"
-            aria-selected={i === activeIdx}
+            aria-selected={i === activeIdx && !tagged}
+            aria-disabled={tagged}
+            disabled={tagged}
             className={`mention-pop-item kind-${hit.kind}${
-              i === activeIdx ? ' is-active' : ''
+              i === activeIdx && !tagged ? ' is-active' : ''
             }${tagged ? ' is-tagged' : ''}`}
-            onMouseEnter={() => onHoverIdx(i)}
+            onMouseEnter={() => {
+              if (!tagged) onHoverIdx(i)
+            }}
             onMouseDown={(e) => {
               e.preventDefault()
+              if (tagged) return
               onPick(hit, e.ctrlKey || e.metaKey)
             }}
           >
@@ -115,7 +199,9 @@ export function MentionMenu({
               {mentionKindLabel(hit.kind)}
             </span>
             <span className="mention-pop-name">{hit.entity_name}</span>
-            <span className="muted mention-pop-sub">{hit.subtitle}</span>
+            <span className="muted mention-pop-sub">
+              {tagged ? 'ya marcado' : hit.subtitle}
+            </span>
           </button>
         )
       })}

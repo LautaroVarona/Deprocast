@@ -14,6 +14,11 @@ import {
   serializeBackupXml,
   type BackupApplyResult,
 } from '../services/backup.js'
+import {
+  dumpQuantomoStage,
+  parseQuantomoExportStage,
+  quantomoStageExportBasename,
+} from '../services/quantomoExport.js'
 import { maybeDecryptDumpFile, maybeEncryptDump } from '../services/backupCrypto.js'
 import { parseBackupFormat } from '../../shared/httpSchemas.js'
 import { ZIP_LIMITS } from '../services/zipLimits.js'
@@ -250,6 +255,31 @@ function handleImport(mode: 'replace' | 'merge') {
     })()
   }
 }
+
+backupRouter.get('/quantomos', (req, res) => {
+  try {
+    const stage = parseQuantomoExportStage(req.query.stage)
+    if (!stage) {
+      res.status(400).json({
+        error: 'stage debe ser proto, pre o sealed (protoquantomos / prequantomos / quantomos)',
+      })
+      return
+    }
+    const dump = dumpQuantomoStage(stage)
+    const filename = `${quantomoStageExportBasename(stage)}.json`
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filename}"`,
+    )
+    res.send(JSON.stringify(dump, null, 2))
+  } catch (err) {
+    console.error('[backup/quantomos]', err)
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Export de quántomos fallido',
+    })
+  }
+})
 
 backupRouter.get('/summary', (_req, res) => {
   try {

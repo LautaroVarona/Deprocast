@@ -36,14 +36,18 @@ pipelineRouter.post('/pause', (_req, res) => {
   })
 })
 
-pipelineRouter.post('/resume', (_req, res) => {
-  const result = resumePipeline()
-  res.json({
-    ok: true,
-    ...result,
-    ...getPipelineStatus(),
-    message: 'Pipeline listo — usá Procesar para continuar',
-  })
+pipelineRouter.post('/resume', async (_req, res) => {
+  try {
+    const result = await resumePipeline()
+    res.json({
+      ok: true,
+      ...result,
+      ...getPipelineStatus(),
+    })
+  } catch (err) {
+    console.error('[pipeline/resume]', err)
+    res.status(500).json({ error: 'No se pudo reanudar el pipeline' })
+  }
 })
 
 pipelineRouter.get('/status', (_req, res) => {

@@ -4,7 +4,7 @@ import dotenv from 'dotenv'
 import express from 'express'
 import cors from 'cors'
 import { closeDb, initDb } from './db.js'
-import { recoverOrphanedProcessing } from './services/pipeline.js'
+import { recoverOrphanedProcessing, kickPipeline } from './services/pipeline.js'
 import { recoverExpiredLeases } from './services/jobs.js'
 import { repairChatDestillLinks } from './services/chatProcess.js'
 import { ingestRouter } from './routes/ingest.js'
@@ -36,6 +36,8 @@ import { dialogoRouter } from './routes/dialogo.js'
 import { sentinelRouter } from './routes/sentinel.js'
 import { liveRouter } from './routes/live.js'
 import { configRouter } from './routes/config.js'
+import { knowledgeRouter } from './routes/knowledge.js'
+import { kickKnowledgeJobs } from './services/knowledge.js'
 import { attachLiveWsProxy } from './liveWs.js'
 import { capabilities, validateEnv } from './config.js'
 import {
@@ -71,6 +73,12 @@ try {
   console.warn('[chats] no se pudieron recortar vínculos:', err)
 }
 recoverOrphanedProcessing()
+kickPipeline()
+try {
+  kickKnowledgeJobs()
+} catch {
+  /* tabla puede no existir en boot parcial */
+}
 try {
   const n = recoverExpiredLeases()
   if (n > 0) console.warn(`[jobs] reencolados ${n} lease(s) expirados`)
@@ -143,6 +151,7 @@ app.use('/api/dialogo', dialogoRouter)
 app.use('/api/sentinela', sentinelRouter)
 app.use('/api/live', liveRouter)
 app.use('/api/config', configRouter)
+app.use('/api/knowledge', knowledgeRouter)
 
 app.use(
   (

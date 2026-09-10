@@ -3,6 +3,8 @@ import { api, type ProposalBundle } from '../services/api'
 
 interface Props {
   refreshKey: number
+  focusEntryId?: string | null
+  onFocusConsumed?: () => void
 }
 
 function formatTs(iso: string | null): string {
@@ -74,7 +76,11 @@ function downloadJson(filename: string, data: unknown) {
   URL.revokeObjectURL(url)
 }
 
-export function ValidatedSection({ refreshKey }: Props) {
+export function ValidatedSection({
+  refreshKey,
+  focusEntryId = null,
+  onFocusConsumed,
+}: Props) {
   const [entries, setEntries] = useState<ProposalBundle[]>([])
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -102,6 +108,12 @@ export function ValidatedSection({ refreshKey }: Props) {
   useEffect(() => {
     void load()
   }, [load, refreshKey])
+
+  useEffect(() => {
+    if (!focusEntryId) return
+    setExpandedId(focusEntryId)
+    onFocusConsumed?.()
+  }, [focusEntryId, onFocusConsumed])
 
   useEffect(() => {
     const id = window.setInterval(() => {

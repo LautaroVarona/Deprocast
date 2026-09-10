@@ -90,6 +90,11 @@ import type {
   SentinelMessage,
   SentinelEvent,
   SentinelSkill,
+  KnowledgeEntity,
+  KnowledgeKind,
+  KnowledgeNeighbor,
+  KnowledgeAnchor,
+  KnowledgeAnchorRole,
 } from '../types'
 import { request } from './http'
 
@@ -1818,8 +1823,14 @@ export const api = {
       body: JSON.stringify({ weight }),
     }),
 
-  exportNotebook: async (id: string, titleHint?: string) => {
-    const res = await fetch(`/api/notebooks/${id}/export`)
+  exportNotebook: async (
+    id: string,
+    titleHint?: string,
+    format: 'zip' | 'json' = 'zip',
+  ) => {
+    const res = await fetch(
+      `/api/notebooks/${id}/export?format=${encodeURIComponent(format)}`,
+    )
     if (!res.ok) {
       let message = `HTTP ${res.status}`
       try {
@@ -1834,10 +1845,13 @@ export const api = {
     const cd = res.headers.get('Content-Disposition') || ''
     const match = /filename="([^"]+)"/.exec(cd)
     const day = new Date().toISOString().slice(0, 10)
-    const fallback = `cuaderno-${(titleHint || 'export')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/gi, '-')
-      .replace(/^-+|-+$/g, '') || 'export'}-${day}.zip`
+    const slug =
+      (titleHint || 'export')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/gi, '-')
+        .replace(/^-+|-+$/g, '') || 'export'
+    const ext = format === 'json' ? 'json' : 'zip'
+    const fallback = `cuaderno-${slug}-${day}.${ext}`
     const filename = match?.[1] || fallback
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -2093,6 +2107,140 @@ export const api = {
       { method: 'POST', body: JSON.stringify({}) },
     ),
 
+  listKnowledge: (opts?: {
+    q?: string
+    kind?: string
+    pulse?: string
+    limit?: number
+  }) => {
+    const params = new URLSearchParams()
+    if (opts?.q) params.set('q', opts.q)
+    if (opts?.kind) params.set('kind', opts.kind)
+    if (opts?.pulse) params.set('pulse', opts.pulse)
+    if (opts?.limit != null) params.set('limit', String(opts.limit))
+    const qs = params.toString()
+    return request<{ ok: boolean; items: KnowledgeEntity[] }>(
+      `/api/knowledge${qs ? `?${qs}` : ''}`,
+    )
+  },
+
+  getKnowledge: (id: string) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>(`/api/knowledge/${id}`),
+
+  createKnowledgeFromUrl: (url: string) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>('/api/knowledge', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
+
+  createKnowledgeManual: (body: {
+    kind?: KnowledgeKind
+    title: string
+    authors_org?: string
+    source_url?: string
+    summary?: string
+    utility_problem?: string
+    architecture_tldr?: string
+    use_cases?: string
+    notes?: string
+    domain_ids?: string[]
+    tags?: string[]
+    repo?: {
+      owner?: string
+      repo_name?: string
+      stack_tags?: string[]
+      last_commit_at?: string | null
+      open_issues?: number | null
+      stars?: number | null
+      archived?: boolean
+      license?: string | null
+      description_upstream?: string
+      default_branch?: string | null
+    }
+  }) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>('/api/knowledge', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  patchKnowledge: (
+    id: string,
+    body: Record<string, unknown>,
+  ) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>(`/api/knowledge/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deleteKnowledge: (id: string) =>
+    request<{ ok: boolean; id: string }>(`/api/knowledge/${id}`, {
+      method: 'DELETE',
+    }),
+
+  refreshKnowledge: (id: string) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>(
+      `/api/knowledge/${id}/refresh`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  regenerateKnowledgeUtility: (id: string) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>(
+      `/api/knowledge/${id}/utility`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  distillKnowledge: (id: string, weight?: number) =>
+    request<{
+      ok: boolean
+      entity: KnowledgeEntity
+      quantomo_ids: string[]
+    }>(`/api/knowledge/${id}/distill`, {
+      method: 'POST',
+      body: JSON.stringify({ weight }),
+    }),
+
+  knowledgeNeighbors: (id: string) =>
+    request<{ ok: boolean; neighbors: KnowledgeNeighbor[] }>(
+      `/api/knowledge/${id}/neighbors`,
+    ),
+
+  addKnowledgeAnchor: (
+    id: string,
+    body: {
+      matrix_id: string
+      row_item_id: string
+      col_item_id: string
+      role?: KnowledgeAnchorRole
+    },
+  ) =>
+    request<{ ok: boolean; anchor: KnowledgeAnchor }>(
+      `/api/knowledge/${id}/anchors`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  deleteKnowledgeAnchor: (id: string, anchorId: string) =>
+    request<{ ok: boolean; id: string }>(
+      `/api/knowledge/${id}/anchors/${anchorId}`,
+      { method: 'DELETE' },
+    ),
+
+  knowledgeHarvest: () =>
+    request<{
+      ok: boolean
+      links: Array<{
+        id: string
+        url_cruda: string
+        url_norm: string
+        estado_crawler: string
+      }>
+    }>('/api/knowledge/harvest'),
+
+  captureKnowledgeFromHarvest: (link_id: string) =>
+    request<{ ok: boolean; item: KnowledgeEntity }>('/api/knowledge/from-harvest', {
+      method: 'POST',
+      body: JSON.stringify({ link_id }),
+    }),
+
   getRun: () =>
     request<{ ok: boolean; run: AppRun | null }>('/api/run'),
 
@@ -2145,6 +2293,11 @@ export const api = {
         perfiles: number
         conexiones: number
         quantomos: number
+        quantomo_stages?: {
+          proto: number
+          pre: number
+          sealed: number
+        }
         validaciones: number
         ida: number
         resto: number

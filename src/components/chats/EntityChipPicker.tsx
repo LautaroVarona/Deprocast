@@ -6,6 +6,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { api } from '../../services/api'
+import { orderTaggedLast, stepSelectableIdx } from '../MentionMenu'
 
 export type ChipKind =
   | 'person'
@@ -83,8 +84,8 @@ export function EntityChipPicker({
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abort = useRef<AbortController | null>(null)
   const selectedIds = new Set(selected.map((s) => `${s.kind}:${s.id}`))
-  const visibleHits = hits.filter(
-    (h) => !selectedIds.has(`${h.kind}:${h.id}`),
+  const menuHits = orderTaggedLast(hits, (h) =>
+    selectedIds.has(`${h.kind}:${h.id}`),
   )
 
   useEffect(() => {
@@ -126,12 +127,9 @@ export function EntityChipPicker({
           })
           .then((res) => {
             const allowed = new Set(kinds)
-            const taken = new Set(selected.map((s) => `${s.kind}:${s.id}`))
             const next: Hit[] = (res.results ?? [])
               .filter((r): r is typeof r & { kind: ChipKind } =>
-                isChipKind(r.kind) &&
-                allowed.has(r.kind) &&
-                !taken.has(`${r.kind}:${r.id}`),
+                isChipKind(r.kind) && allowed.has(r.kind),
               )
               .map((r) => ({
                 id: r.id,
@@ -156,15 +154,11 @@ export function EntityChipPicker({
           .finally(() => setBusy(false))
       }, 120)
     },
-    [kinds, selected],
+    [kinds],
   )
 
   function add(hit: Hit) {
-    if (selectedIds.has(`${hit.kind}:${hit.id}`)) {
-      setQuery('')
-      setOpen(false)
-      return
-    }
+    if (selectedIds.has(`${hit.kind}:${hit.id}`)) return
     onChange([...selected, { id: hit.id, name: hit.name, kind: hit.kind }])
     setQuery('')
     setHits([])
@@ -186,22 +180,25 @@ export function EntityChipPicker({
     )
 
   function onKey(e: ReactKeyboardEvent<HTMLInputElement>) {
+    const isTagged = (h: Hit) => selectedIds.has(`${h.kind}:${h.id}`)
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      if (visibleHits.length) setIdx((i) => (i + 1) % visibleHits.length)
+      if (menuHits.length) {
+        setIdx((i) => stepSelectableIdx(menuHits, i, 1, isTagged))
+      }
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      if (visibleHits.length) {
-        setIdx((i) => (i - 1 + visibleHits.length) % visibleHits.length)
+      if (menuHits.length) {
+        setIdx((i) => stepSelectableIdx(menuHits, i, -1, isTagged))
       }
       return
     }
     if (e.key === 'Enter') {
       e.preventDefault()
-      const hit = visibleHits[idx]
-      if (hit) add(hit)
+      const hit = menuHits[idx]
+      if (hit && !isTagged(hit)) add(hit)
       else if (canCreate && kinds.length === 1) {
         onCreate?.(query.trim(), kinds[0] ?? 'person')
       }
@@ -261,27 +258,38 @@ export function EntityChipPicker({
           if (query.trim()) runSearch(query)
         }}
       />
-      {open && (visibleHits.length > 0 || busy || canCreate) && (
+      {open && (menuHits.length > 0 || busy || canCreate) && (
         <ul className="chat-chip-menu" role="listbox">
-          {busy && visibleHits.length === 0 ? (
+          {busy && menuHits.length === 0 ? (
             <li className="muted">Buscando…</li>
           ) : null}
-          {visibleHits.map((hit, i) => (
-            <li key={`${hit.kind}:${hit.id}`}>
-              <button
-                type="button"
-                className={i === idx ? 'is-active' : ''}
-                onMouseEnter={() => setIdx(i)}
-                onClick={() => add(hit)}
-              >
-                <strong>{hit.name}</strong>
-                <span className="muted">
-                  {CHIP_KIND_LABEL[hit.kind]}
-                  {hit.subtitle ? ` · ${hit.subtitle}` : ''}
-                </span>
-              </button>
-            </li>
-          ))}
+          {menuHits.map((hit, i) => {
+            const already = selectedIds.has(`${hit.kind}:${hit.id}`)
+            return (
+              <li key={`${hit.kind}:${hit.id}`}>
+                <button
+                  type="button"
+                  disabled={disabled || already}
+                  className={`${i === idx && !already ? 'is-active' : ''}${
+                    already ? ' is-tagged' : ''
+                  }`}
+                  onMouseEnter={() => {
+                    if (!already) setIdx(i)
+                  }}
+                  onClick={() => add(hit)}
+                >
+                  <strong>{hit.name}</strong>
+                  <span className="muted">
+                    {already
+                      ? 'ya marcado'
+                      : `${CHIP_KIND_LABEL[hit.kind]}${
+                          hit.subtitle ? ` · ${hit.subtitle}` : ''
+                        }`}
+                  </span>
+                </button>
+              </li>
+            )
+          })}
           {canCreate
             ? kinds.map((kind) => (
                 <li key={`create:${kind}`}>

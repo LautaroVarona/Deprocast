@@ -10,8 +10,11 @@ import {
 import { api } from '../services/api'
 import type { BlobNote, BlobTag, BlobTagKind } from '../types'
 import {
+  isMentionTagged,
   MentionMenu,
   mentionKindLabel,
+  orderMentionHits,
+  stepSelectableMentionIdx,
   type MentionMenuHit,
 } from './MentionMenu'
 import { getTextareaCaretRect } from '../lib/textareaCaret'
@@ -145,10 +148,20 @@ export function BlobComposer({ onChanged }: Props) {
     setMentionAnchor(getTextareaCaretRect(ta, offset ?? ta.selectionStart))
   }, [])
 
+  const taggedIds = useMemo(
+    () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
+    [tags],
+  )
+  const menuHits = useMemo(
+    () => orderMentionHits(mentionHits, taggedIds),
+    [mentionHits, taggedIds],
+  )
+
   const applyMention = useCallback(
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (isMentionTagged(hit, taggedIds)) return
       if (
         hit.kind !== 'person' &&
         hit.kind !== 'project' &&
@@ -192,7 +205,7 @@ export function BlobComposer({ onChanged }: Props) {
         if (multi) syncMentionAnchor(caret)
       })
     },
-    [mentionRange, text, tags, runMentionSearch, syncMentionAnchor],
+    [mentionRange, text, tags, taggedIds, runMentionSearch, syncMentionAnchor],
   )
 
   const removeTag = (tag: BlobTag) => {
@@ -253,23 +266,25 @@ export function BlobComposer({ onChanged }: Props) {
     if (mentionOpen) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        if (mentionHits.length > 0) {
-          setMentionIdx((i) => (i + 1) % mentionHits.length)
+        if (menuHits.length > 0) {
+          setMentionIdx((i) =>
+            stepSelectableMentionIdx(menuHits, i, 1, taggedIds),
+          )
         }
         return
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault()
-        if (mentionHits.length > 0) {
-          setMentionIdx(
-            (i) => (i - 1 + mentionHits.length) % mentionHits.length,
+        if (menuHits.length > 0) {
+          setMentionIdx((i) =>
+            stepSelectableMentionIdx(menuHits, i, -1, taggedIds),
           )
         }
         return
       }
-      if ((e.key === 'Enter' || e.key === 'Tab') && mentionHits.length > 0) {
+      if ((e.key === 'Enter' || e.key === 'Tab') && menuHits.length > 0) {
         e.preventDefault()
-        applyMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+        applyMention(menuHits[mentionIdx]!, e.ctrlKey || e.metaKey)
         return
       }
       if (e.key === 'Escape') {
@@ -329,10 +344,6 @@ export function BlobComposer({ onChanged }: Props) {
   }
 
   const canSend = text.trim().length > 0 && !busy
-  const taggedIds = useMemo(
-    () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
-    [tags],
-  )
 
   return (
     <div className="blob-capture">
@@ -360,7 +371,7 @@ export function BlobComposer({ onChanged }: Props) {
           />
           <MentionMenu
             open={mentionOpen}
-            hits={mentionHits}
+            hits={menuHits}
             activeIdx={mentionIdx}
             busy={mentionBusy}
             anchor={mentionAnchor}

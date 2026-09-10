@@ -15,8 +15,15 @@ import type {
   NotebookPage,
   NotebookPageVisionMeta,
 } from '../types'
-import { MentionMenu, type MentionMenuHit } from './MentionMenu'
+import {
+  isMentionTagged,
+  MentionMenu,
+  orderMentionHits,
+  stepSelectableMentionIdx,
+  type MentionMenuHit,
+} from './MentionMenu'
 import { getTextareaCaretRect } from '../lib/textareaCaret'
+import { NbImageZoom } from './NbImageZoom'
 import { PageImageEditor } from './PageImageEditor'
 
 const TOTAL_FACES = 160
@@ -174,8 +181,12 @@ export function PageValidationPanel({
   )
 
   const taggedIds = useMemo(
-    () => new Set(tags.map((t) => t.entity_id)),
+    () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
     [tags],
+  )
+  const menuHits = useMemo(
+    () => orderMentionHits(mentionHits, taggedIds),
+    [mentionHits, taggedIds],
   )
 
   const load = async (
@@ -454,6 +465,7 @@ export function PageValidationPanel({
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (isMentionTagged(hit, taggedIds)) return
       if (
         hit.kind !== 'person' &&
         hit.kind !== 'project' &&
@@ -497,7 +509,7 @@ export function PageValidationPanel({
         if (multi) syncMentionAnchor(caret)
       })
     },
-    [mentionRange, entityNote, tags, runMentionSearch, syncMentionAnchor],
+    [mentionRange, entityNote, tags, taggedIds, runMentionSearch, syncMentionAnchor],
   )
 
   const onEntityChange = (value: string) => {
@@ -520,23 +532,25 @@ export function PageValidationPanel({
     if (!mentionOpen) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx((i) => (i + 1) % mentionHits.length)
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, 1, taggedIds),
+        )
       }
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx(
-          (i) => (i - 1 + mentionHits.length) % mentionHits.length,
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, -1, taggedIds),
         )
       }
       return
     }
-    if ((e.key === 'Enter' || e.key === 'Tab') && mentionHits.length > 0) {
+    if ((e.key === 'Enter' || e.key === 'Tab') && menuHits.length > 0) {
       e.preventDefault()
-      applyMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+      applyMention(menuHits[mentionIdx]!, e.ctrlKey || e.metaKey)
       return
     }
     if (e.key === 'Escape') {
@@ -727,7 +741,7 @@ export function PageValidationPanel({
               }}
             />
           ) : page.image_path && !imageBroken ? (
-            <img
+            <NbImageZoom
               src={imageUrl}
               alt={label}
               onError={() => setImageBroken(true)}
@@ -834,7 +848,7 @@ export function PageValidationPanel({
             {pane === 'entidades' && (
               <MentionMenu
                 open={mentionOpen}
-                hits={mentionHits}
+                hits={menuHits}
                 activeIdx={mentionIdx}
                 busy={mentionBusy}
                 anchor={mentionAnchor}

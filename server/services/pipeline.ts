@@ -16,6 +16,8 @@ import {
   enhanceAudio,
   enhanceOnIngest,
   enhancedAudioPath,
+  sterilizeAudioForStt,
+  sterileBeforeStt,
 } from './audioAnalysis.js'
 import {
   applyEntryManualTagsAsLinks,
@@ -27,6 +29,7 @@ import {
 import { parseManualTags } from './bookmarkProcess.js'
 import { waitWhile } from './wait.js'
 import { resolveContained } from './paths.js'
+import { continueDrainIds, mergeEnqueueIds } from './pipelineQueue.js'
 
 let running = false
 let paused = false
@@ -214,11 +217,52 @@ export function pausePipeline(): {
   }
 }
 
-export function resumePipeline(): { paused: boolean } {
+export async function resumePipeline(): Promise<{
+  paused: boolean
+  accepted: string[]
+  message: string
+}> {
   paused = false
   console.log('[pipeline] resumed')
-  setLiveStage('idle', 'Listo para procesar')
-  return { paused: false }
+  const result = await enqueuePipeline(undefined, { unpause: true })
+  return {
+    paused: false,
+    accepted: result.accepted,
+    message: result.message || 'Pipeline reanudado',
+  }
+}
+
+function loadDrainableByStatus(status: 'queued' | 'pending_extract'): string[] {
+  const found = rows<{ id: string }>(
+    getDb()
+      .prepare(
+        `SELECT id FROM entries WHERE status = ? ORDER BY created_at ASC`,
+      )
+      .all(status),
+  )
+  return found.map((r) => r.id)
+}
+
+function loadDrainableIds(): string[] {
+  const found = rows<{ id: string }>(
+    getDb()
+      .prepare(
+        `SELECT id FROM entries WHERE status IN ('queued', 'pending_extract') ORDER BY created_at ASC`,
+      )
+      .all(),
+  )
+  return found.map((r) => r.id)
+}
+
+/** Encola sin des-pausar (ingest / voto). No-op si está pausado. */
+export function kickPipeline(entryIds?: string[]): void {
+  if (paused) {
+    console.log('[pipeline] kick omitido — pausado')
+    return
+  }
+  void enqueuePipeline(entryIds, { unpause: false }).catch((err) => {
+    console.error('[pipeline] kick failed:', err)
+  })
 }
 
 export async function waitPipelineIdle(ms: number): Promise<void> {
@@ -229,11 +273,20 @@ export function isPipelineBusy(): boolean {
   return running
 }
 
-export async function enqueuePipeline(entryIds?: string[]): Promise<{
+export async function enqueuePipeline(
+  entryIds?: string[],
+  opts?: { unpause?: boolean },
+): Promise<{
   accepted: string[]
   message: string
 }> {
   if (paused) {
+    if (opts?.unpause === false) {
+      return {
+        accepted: [],
+        message: 'Pipeline pausado — las cargas quedan en cola',
+      }
+    }
     paused = false
     console.log('[pipeline] auto-resume on run')
   }
@@ -249,19 +302,7 @@ export async function enqueuePipeline(entryIds?: string[]): Promise<{
           : `sin progreso ${Math.round(stuckMs / 1000)}s`,
       )
     } else {
-      // Drain sano en curso: solo sumar a la cola
-      const db = getDb()
-      let ids = entryIds
-      if (!ids || ids.length === 0) {
-        const found = rows<{ id: string }>(
-          db
-            .prepare(
-              `SELECT id FROM entries WHERE status IN ('queued', 'pending_extract') ORDER BY created_at ASC`,
-            )
-            .all(),
-        )
-        ids = found.map((r) => r.id)
-      }
+      const ids = mergeEnqueueIds(entryIds, loadDrainableIds())
       for (const id of ids) {
         abortedIds.delete(id)
         if (!queue.includes(id)) queue.push(id)
@@ -278,19 +319,7 @@ export async function enqueuePipeline(entryIds?: string[]): Promise<{
   }
 
   const recovered = recoverOrphanedProcessing()
-  const db = getDb()
-  let ids = entryIds
-
-  if (!ids || ids.length === 0) {
-    const found = rows<{ id: string }>(
-      db
-        .prepare(
-          `SELECT id FROM entries WHERE status IN ('queued', 'pending_extract') ORDER BY created_at ASC`,
-        )
-        .all(),
-    )
-    ids = found.map((r) => r.id)
-  }
+  const ids = mergeEnqueueIds(entryIds, [...queue, ...loadDrainableIds()])
 
   if (ids.length === 0) {
     return {
@@ -335,6 +364,9 @@ async function drainQueue(): Promise<void> {
   syncLiveCounts()
   console.log(`[pipeline] drain start gen=${gen} queue=${queue.length}`)
 
+  const attempted: string[] = []
+  const failed: string[] = []
+
   try {
     while (queue.length > 0) {
       if (gen !== drainGen) {
@@ -350,6 +382,7 @@ async function drainQueue(): Promise<void> {
         abortedIds.delete(id)
         continue
       }
+      attempted.push(id)
       currentEntryId = id
       syncLiveCounts()
       try {
@@ -362,6 +395,7 @@ async function drainQueue(): Promise<void> {
         }
       } catch (err) {
         console.error(`[pipeline] entry ${id} failed:`, err)
+        failed.push(id)
         if (!abortedIds.has(id)) {
           getDb()
             .prepare(
@@ -379,6 +413,24 @@ async function drainQueue(): Promise<void> {
     activeDrains.delete(gen)
     if (gen === drainGen) {
       running = false
+      if (!paused) {
+        const next = continueDrainIds({
+          leftoverQueue: queue,
+          pendingExtract: loadDrainableByStatus('pending_extract'),
+          queued: loadDrainableByStatus('queued'),
+          attempted,
+          failed,
+        })
+        if (next.length > 0) {
+          queue = next
+          for (const id of next) abortedIds.delete(id)
+          console.log(
+            `[pipeline] drain continue gen=${gen} → ${next.length} restante(s)`,
+          )
+          void drainQueue()
+          return
+        }
+      }
       if (paused) {
         setLiveStage('paused', 'Pausado', {
           currentTitle: null,
@@ -474,6 +526,32 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
     }
   }
 
+  setLiveStage('stt', 'Esterilizando audio…', {
+    currentTitle: entry.title,
+    transcript: '',
+    stub: false,
+    chunk: null,
+    totalChunks: null,
+  })
+
+  let sttPath = absPath
+  let sterilePatch: Record<string, unknown> = {}
+  if (sterileBeforeStt()) {
+    try {
+      const sterile = await sterilizeAudioForStt(absPath, entry.vault_path)
+      sttPath = sterile.sttPath
+      sterilePatch = { ...sterile.analysisPatch }
+      console.log(
+        `[pipeline] ${entryId} F1 STT ← ${path.basename(sttPath)}${
+          sterile.analysisPatch.concat_speech ? ' (concat)' : ''
+        }`,
+      )
+    } catch (err) {
+      console.warn(`[pipeline] ${entryId} F1 esterilizar:`, err)
+      sttPath = absPath
+    }
+  }
+
   setLiveStage('stt', 'Transcribiendo… (Deepgram)', {
     currentTitle: entry.title,
     transcript: '',
@@ -483,7 +561,7 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
   })
 
   const { text, stub, utterances } = await transcribeAudio(
-    absPath,
+    sttPath,
     entry.title,
     (partial, meta) => {
       if (shouldAbort(entryId)) return
@@ -559,8 +637,17 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
   try {
     const analysis = await analyzeAudioSilence(absPath, utterances)
     if (analysis) {
-      audioAnalysisJson = JSON.stringify(analysis)
+      const merged = { ...analysis, ...sterilePatch }
+      audioAnalysisJson = JSON.stringify(merged)
       analysisDuration = analysis.duration_sec
+    } else if (Object.keys(sterilePatch).length > 0) {
+      audioAnalysisJson = JSON.stringify({
+        silence_regions: [],
+        speech_regions: [],
+        duration_sec: null,
+        analyzed_at: new Date().toISOString(),
+        ...sterilePatch,
+      })
     }
   } catch (err) {
     console.warn(`[pipeline] ${entryId} audio analysis:`, err)
@@ -594,25 +681,27 @@ async function transcribeForCriba(entry: Entry): Promise<string[] | void> {
 
   if (enhanceOnIngest() && entry.vault_path) {
     const out = enhancedAudioPath(entry.vault_path)
-    void enhanceAudio(absPath, out).then((ok) => {
-      if (!ok) return
-      const row = db
-        .prepare(`SELECT audio_analysis_json FROM entries WHERE id = ?`)
-        .get(entryId) as { audio_analysis_json: string | null } | undefined
-      if (!row?.audio_analysis_json) return
-      try {
-        const parsed = JSON.parse(row.audio_analysis_json) as Record<
-          string,
-          unknown
-        >
-        parsed.enhanced_available = true
-        db.prepare(
-          `UPDATE entries SET audio_analysis_json = ? WHERE id = ?`,
-        ).run(JSON.stringify(parsed), entryId)
-      } catch {
-        /* ignore */
-      }
-    })
+    if (!fs.existsSync(out)) {
+      void enhanceAudio(absPath, out).then((ok) => {
+        if (!ok) return
+        const row = db
+          .prepare(`SELECT audio_analysis_json FROM entries WHERE id = ?`)
+          .get(entryId) as { audio_analysis_json: string | null } | undefined
+        if (!row?.audio_analysis_json) return
+        try {
+          const parsed = JSON.parse(row.audio_analysis_json) as Record<
+            string,
+            unknown
+          >
+          parsed.enhanced_available = true
+          db.prepare(
+            `UPDATE entries SET audio_analysis_json = ? WHERE id = ?`,
+          ).run(JSON.stringify(parsed), entryId)
+        } catch {
+          /* ignore */
+        }
+      })
+    }
   }
 
   setLiveStage('done', `Listo para criba · «${entry.title}»`, {

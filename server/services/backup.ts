@@ -16,6 +16,7 @@ import {
 } from '../db.js'
 import { normalizeName } from './entityMatch.js'
 import { csvEscape } from './csvSafe.js'
+import { countQuantomosByStage } from './quantomoExport.js'
 import {
   RESTORE_DB_PATH,
   rmSqliteBundle,
@@ -90,6 +91,12 @@ export const BACKUP_TABLES = [
   'sentinel_messages',
   'sentinel_events',
   'sentinel_skills',
+  'knowledge_entities',
+  'knowledge_repos',
+  'knowledge_papers',
+  'knowledge_legal',
+  'knowledge_books',
+  'knowledge_anchors',
 ] as const
 
 export type BackupTableName = (typeof BACKUP_TABLES)[number]
@@ -131,6 +138,12 @@ export const USER_ACTIVITY_TABLES = [
   'feedback_notes',
   'ama_flows',
   'app_runs',
+  'knowledge_entities',
+  'knowledge_repos',
+  'knowledge_papers',
+  'knowledge_legal',
+  'knowledge_books',
+  'knowledge_anchors',
 ] as const
 
 export type BackupRunMeta = {
@@ -173,6 +186,11 @@ export type BackupSummary = {
     perfiles: number
     conexiones: number
     quantomos: number
+    quantomo_stages: {
+      proto: number
+      pre: number
+      sealed: number
+    }
     validaciones: number
     ida: number
     resto: number
@@ -318,6 +336,7 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('entity_proposals') +
         n('agrupacion_members'),
       quantomos: n('quantomos'),
+      quantomo_stages: countQuantomosByStage(),
       validaciones: n('validated_file_metadata'),
       ida,
       resto:
@@ -357,7 +376,13 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('map_systems') +
         n('map_layers') +
         n('map_tags') +
-        n('depro_power_notes'),
+        n('depro_power_notes') +
+        n('knowledge_entities') +
+        n('knowledge_repos') +
+        n('knowledge_papers') +
+        n('knowledge_legal') +
+        n('knowledge_books') +
+        n('knowledge_anchors'),
     },
   }
 }
@@ -1359,6 +1384,11 @@ export function wipeUserActivity(): void {
       /* ignore */
     }
     throw err
+  }
+  try {
+    fs.rmSync(path.join(VAULT_DIR, 'knowledge'), { recursive: true, force: true })
+  } catch {
+    /* ignore */
   }
   ensureTrincheraSeed()
 }

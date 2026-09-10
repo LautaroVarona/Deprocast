@@ -126,6 +126,10 @@ export function RespaldoSection({ refreshKey, run }: Props) {
     window.location.href = `/api/backup?format=${format}`
   }
 
+  function downloadQuantomos(stage: 'proto' | 'pre' | 'sealed') {
+    window.location.href = `/api/backup/quantomos?stage=${stage}`
+  }
+
   async function handleMerge() {
     if (!mergeFile) return
     if (mergeConfirm !== 'FUSIONAR') return
@@ -251,6 +255,12 @@ export function RespaldoSection({ refreshKey, run }: Props) {
           <div>
             <strong>{g.quantomos}</strong>
             <span>Quántomos</span>
+            {g.quantomo_stages && (
+              <em className="respaldo-count-sub">
+                {g.quantomo_stages.proto} proto · {g.quantomo_stages.pre}{' '}
+                pre · {g.quantomo_stages.sealed} sellados
+              </em>
+            )}
           </div>
           <div>
             <strong>{g.validaciones}</strong>
@@ -299,6 +309,44 @@ export function RespaldoSection({ refreshKey, run }: Props) {
           </button>
           <button type="button" className="btn" onClick={() => download('xml')}>
             XML
+          </button>
+        </div>
+      </div>
+
+      <div className="respaldo-block">
+        <h3>Quántomos por etapa (JSON)</h3>
+        <p className="muted">
+          Un solo archivo por etapa: átomos, lattice L72 y vínculos. No es el
+          respaldo completo y no se fusiona acá.
+        </p>
+        <div className="respaldo-actions">
+          <button
+            type="button"
+            className="btn"
+            onClick={() => downloadQuantomos('proto')}
+          >
+            Protoquántomos
+            {g?.quantomo_stages != null
+              ? ` (${g.quantomo_stages.proto})`
+              : ''}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => downloadQuantomos('pre')}
+          >
+            Prequántomos
+            {g?.quantomo_stages != null ? ` (${g.quantomo_stages.pre})` : ''}
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => downloadQuantomos('sealed')}
+          >
+            Quántomos
+            {g?.quantomo_stages != null
+              ? ` (${g.quantomo_stages.sealed})`
+              : ''}
           </button>
         </div>
       </div>

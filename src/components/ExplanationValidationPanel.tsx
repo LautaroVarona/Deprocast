@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../services/api'
 import type { Notebook, NotebookPage } from '../types'
+import { NbImageZoom } from './NbImageZoom'
 
 const EXPLANATION_SEPARATOR = '____________________'
 
@@ -325,7 +326,7 @@ export function ExplanationValidationPanel({
       <div className="nb-validate-split nb-explain-validate-split is-fit">
         <div className="nb-validate-image">
           {page.image_path ? (
-            <img src={imageUrl} alt={label} />
+            <NbImageZoom src={imageUrl} alt={label} />
           ) : (
             <div className="nb-face-empty">Sin imagen</div>
           )}

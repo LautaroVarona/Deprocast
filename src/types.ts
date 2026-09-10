@@ -176,6 +176,11 @@ export type AudioAnalysisPayload = {
   duration_sec: number | null
   analyzed_at: string
   enhanced_available?: boolean
+  sterile_available?: boolean
+  sterile_before_stt?: boolean
+  concat_speech?: boolean
+  filters?: string
+  sterile_path?: string
 }
 
 export interface Entry {
@@ -1469,6 +1474,10 @@ export interface DialogoMessage {
     type: 'person' | 'project' | 'quantomo'
     id: string
     label: string
+    entry_id?: string | null
+    source_kind?: string | null
+    timestamp_exact?: string | null
+    locator?: string | null
   }>
 }
 
@@ -1534,6 +1543,110 @@ export interface SentinelEvent {
   kind: 'note' | 'observation' | 'timing' | 'suggestion' | 'error' | 'tool'
   payload: string
   created_at: string
+}
+
+export type KnowledgeKind =
+  | 'repo'
+  | 'paper'
+  | 'legal'
+  | 'book'
+  | 'dataset'
+  | 'curriculum'
+  | 'other'
+
+export type KnowledgeStatus = 'capturing' | 'ready' | 'error'
+export type KnowledgeCaptureMode = 'url' | 'manual'
+export type KnowledgePulse = 'vivo' | 'tibio' | 'abandonado'
+export type KnowledgeAnchorRole = 'conocimiento' | 'interseccion'
+
+export interface KnowledgeRepo {
+  entity_id: string
+  owner: string
+  repo_name: string
+  default_branch: string | null
+  license: string | null
+  description_upstream: string
+  stack_json: string
+  stack_tags: string[]
+  languages_json: string
+  topics_json: string
+  last_commit_at: string | null
+  open_issues: number | null
+  stars: number | null
+  archived: number
+  pushed_at: string | null
+  readme_vault_path: string | null
+  github_snapshot_json: string
+  pulse: KnowledgePulse
+}
+
+export interface KnowledgePaper {
+  entity_id: string
+  doi: string | null
+  authors_json: string
+  abstract: string
+  year: number | null
+  venue: string | null
+}
+
+export interface KnowledgeLegal {
+  entity_id: string
+  jurisdiction: string | null
+  bulletin: string | null
+  articles_json: string
+  effective_at: string | null
+}
+
+export interface KnowledgeBook {
+  entity_id: string
+  isbn: string | null
+  authors_json: string
+  year: number | null
+}
+
+export interface KnowledgeAnchor {
+  id: string
+  entity_id: string
+  matrix_id: string
+  row_item_id: string
+  col_item_id: string
+  role: KnowledgeAnchorRole
+  created_at: string
+}
+
+export interface KnowledgeEntity {
+  id: string
+  kind: KnowledgeKind
+  title: string
+  authors_org: string
+  source_url: string | null
+  summary: string
+  utility_problem: string
+  architecture_tldr: string
+  use_cases: string
+  captured_at: string
+  status: KnowledgeStatus
+  capture_error: string | null
+  weight: number | null
+  distilled_at: string | null
+  domain_ids: string[]
+  tags: string[]
+  notes: string
+  capture_mode: KnowledgeCaptureMode
+  created_at: string
+  updated_at: string
+  repo: KnowledgeRepo | null
+  paper: KnowledgePaper | null
+  legal: KnowledgeLegal | null
+  book: KnowledgeBook | null
+  anchors: KnowledgeAnchor[]
+}
+
+export interface KnowledgeNeighbor {
+  object_type: string
+  object_id: string
+  label: string
+  score: number
 }
 
 export interface SentinelSkill {

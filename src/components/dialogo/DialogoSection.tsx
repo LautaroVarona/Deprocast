@@ -6,6 +6,7 @@ import type {
   DialogoMessage,
   DialogoThread,
 } from '../../types'
+import type { EntityHubMode } from '../EntityHub'
 
 type TypeaheadHit = {
   kind: DialogoEntityRefType
@@ -13,11 +14,17 @@ type TypeaheadHit = {
   label: string
 }
 
+export type DialogoCiteTarget =
+  | { view: 'quantomos'; focusId: string }
+  | { view: 'entidades'; mode: EntityHubMode }
+  | { view: 'validada'; entryId: string }
+
 interface Props {
   refreshKey: number
   initialThreadId?: string | null
   seedQuery?: string | null
   onSeedConsumed?: () => void
+  onCiteNavigate?: (target: DialogoCiteTarget) => void
 }
 
 export function DialogoSection({
@@ -25,6 +32,7 @@ export function DialogoSection({
   initialThreadId = null,
   seedQuery = null,
   onSeedConsumed,
+  onCiteNavigate,
 }: Props) {
   const [threads, setThreads] = useState<DialogoThread[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(initialThreadId)
@@ -406,16 +414,76 @@ export function DialogoSection({
                   {m.role === 'assistant' &&
                     (m.citations ?? []).length > 0 && (
                       <ul className="dialogo-cites">
-                        {(m.citations ?? []).map((c) => (
-                          <li key={`${c.type}:${c.id}`}>
-                            <span className="dialogo-cite-chip">
-                              <span className="dialogo-suggest-kind">
-                                {c.type}
-                              </span>{' '}
-                              {c.label}
-                            </span>
-                          </li>
-                        ))}
+                        {(m.citations ?? []).map((c) => {
+                          const sourceBits = [
+                            c.source_kind,
+                            c.locator,
+                            c.timestamp_exact
+                              ? c.timestamp_exact.slice(0, 16).replace('T', ' ')
+                              : null,
+                          ].filter(Boolean)
+                          return (
+                            <li key={`${c.type}:${c.id}`}>
+                              <button
+                                type="button"
+                                className="dialogo-cite-chip"
+                                title={
+                                  c.entry_id
+                                    ? `fuente ${c.entry_id}`
+                                    : c.label
+                                }
+                                onClick={() => {
+                                  if (!onCiteNavigate) return
+                                  if (c.type === 'quantomo') {
+                                    onCiteNavigate({
+                                      view: 'quantomos',
+                                      focusId: c.id,
+                                    })
+                                    return
+                                  }
+                                  if (c.type === 'person') {
+                                    onCiteNavigate({
+                                      view: 'entidades',
+                                      mode: 'perfiles',
+                                    })
+                                    return
+                                  }
+                                  if (c.type === 'project') {
+                                    onCiteNavigate({
+                                      view: 'entidades',
+                                      mode: 'proyectos',
+                                    })
+                                  }
+                                }}
+                              >
+                                <span className="dialogo-suggest-kind">
+                                  {c.type}
+                                </span>{' '}
+                                {c.label}
+                                {sourceBits.length > 0 ? (
+                                  <span className="dialogo-cite-src">
+                                    {sourceBits.join(' · ')}
+                                  </span>
+                                ) : null}
+                              </button>
+                              {c.entry_id && onCiteNavigate ? (
+                                <button
+                                  type="button"
+                                  className="dialogo-cite-chip dialogo-cite-entry"
+                                  title={`entry ${c.entry_id}`}
+                                  onClick={() =>
+                                    onCiteNavigate({
+                                      view: 'validada',
+                                      entryId: c.entry_id!,
+                                    })
+                                  }
+                                >
+                                  entry
+                                </button>
+                              ) : null}
+                            </li>
+                          )
+                        })}
                       </ul>
                     )}
                 </div>

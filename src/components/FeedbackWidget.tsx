@@ -13,6 +13,7 @@ const VIEW_LABELS: Record<string, string> = {
   grafo: 'Grafo',
   criba: 'Criba',
   biblioteca: 'Biblioteca',
+  conocimiento: 'Conocimiento',
   chats: 'Chats',
   dialogo: 'Diálogo',
   respaldo: 'Respaldo',

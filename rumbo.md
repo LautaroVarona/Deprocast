@@ -7,7 +7,7 @@ producto    : Deprocast
 qué es      : Brújula. Qué hay, qué falta, hacia dónde.
 fecha       : 2026-08-24
 después de  : arquitectura base de la extensión El Cofre (MV3)
-leer con    : cofre.md · quantomos.md · v0.7.1.md · calendario.md
+leer con    : cofre.md · quantomos.md · v0.7.1.md · calendario.md · conocimiento.md
 ```
 
 Este archivo no es un manual de carga ni un inventario de tablas. Es el mapa para volver a leer en frío y saber **dónde estás parado** y **qué decisión viene**.
@@ -85,6 +85,7 @@ Detalle de permisos, protocolo WS y cómo cargar unpacked: [`cofre.md`](cofre.md
 | Directo (live mic) | Operativa | **Ninguna** | No |
 | **El Cofre (extensión)** | **Base MV3 lista, no verificada en runtime aquí** | Vault + `pending_criba` | **Sí, la criba de audio** |
 | Diálogo → Terminar + voto | Diseñado en `quantomos.md` | A confirmar en UI | Debería |
+| Conocimiento (repos GitHub) | Operativa | `knowledge_entities` + vault README | Voto 1–12 antes de protoquántomo. Ver [`conocimiento.md`](conocimiento.md). |
 
 ### Kernel de audio (el que El Cofre usa)
 

@@ -11,14 +11,21 @@ import {
   ORACLE_ENTITY_SNIPPET,
   ORACLE_QUANTOMO_SNIPPET,
   ORACLE_SEED_LIMIT,
+  bm25ToUnit,
   buildOracleFtsQuery,
   formatOracleGraphBlock,
+  clampUnit,
+  fuseHybridCandidate,
   isSealedQuantomoForRag,
+  mergeHybridHits,
   ragAllowsObjectType,
   type OracleNeighbor,
   type OracleRagMode,
   type OracleSeed,
+  type OracleSourceMeta,
+  type ScoredHit,
 } from '../../shared/oracleRag.js'
+import { hybridScore } from './lattice72.js'
 
 /** Marca un par persona↔proyecto para no volver a sugerirlo (X o desvínculo). */
 export function dismissGraphLinkSuggestion(
@@ -153,11 +160,42 @@ export function discoverLinks(
   })
 }
 
+function notebookLocator(quantomoId: string): string | null {
+  const page = row<{ numero_logico: number }>(
+    getDb()
+      .prepare(
+        `SELECT numero_logico FROM pages WHERE quantomo_id = ? LIMIT 1`,
+      )
+      .get(quantomoId),
+  )
+  if (page && Number.isFinite(page.numero_logico)) {
+    return `page:${page.numero_logico}`
+  }
+  return null
+}
+
+function sourceMetaForEntry(entryId: string | null | undefined): OracleSourceMeta {
+  if (!entryId) return {}
+  const e = row<{ timestamp_exact: string | null; source_type: string | null }>(
+    getDb()
+      .prepare(
+        `SELECT timestamp_exact, source_type FROM entries WHERE id = ?`,
+      )
+      .get(entryId),
+  )
+  if (!e) return { entry_id: entryId }
+  return {
+    entry_id: entryId,
+    timestamp_exact: e.timestamp_exact,
+    source_kind: e.source_type,
+  }
+}
+
 function hydrateSeed(
   objectType: string,
   objectId: string,
   score: number,
-): { label: string; snippet: string; score: number; type: string; id: string } | null {
+): OracleSeed | null {
   if (!ragAllowsObjectType(objectType)) return null
   const db = getDb()
   if (objectType === 'person') {
@@ -211,21 +249,33 @@ function hydrateSeed(
       entry_id: string
       stage: string | null
       recognized: number
+      source_kind: string | null
     }>(
       db
         .prepare(
-          `SELECT title, content, entry_id, stage, recognized FROM quantomos WHERE id = ?`,
+          `SELECT title, content, entry_id, stage, recognized, source_kind
+           FROM quantomos WHERE id = ?`,
         )
         .get(objectId),
     )
     if (!q) return null
     if (!isSealedQuantomoForRag(q.recognized, q.stage)) return null
+    const entryMeta = sourceMetaForEntry(q.entry_id)
+    const kind = q.source_kind?.trim() || entryMeta.source_kind || null
+    const locator =
+      kind === 'notebook' || kind === 'notebook_l72'
+        ? notebookLocator(objectId)
+        : null
     return {
       type: 'quantomo',
       id: objectId,
       label: q.title,
       snippet: (q.content ?? '').slice(0, ORACLE_QUANTOMO_SNIPPET),
       score,
+      entry_id: q.entry_id,
+      source_kind: kind,
+      timestamp_exact: entryMeta.timestamp_exact ?? null,
+      locator,
     }
   }
   return null
@@ -236,6 +286,10 @@ interface NeighborLine {
   id: string
   label: string
   via: string
+  entry_id?: string | null
+  source_kind?: string | null
+  timestamp_exact?: string | null
+  locator?: string | null
 }
 
 function neighborsForPerson(personId: string): NeighborLine[] {
@@ -307,11 +361,16 @@ function neighborsForQuantomo(quantomoId: string): NeighborLine[] {
       .all(q.entry_id, quantomoId),
   )
   for (const s of siblings) {
+    const meta = sourceMetaForEntry(q.entry_id)
     out.push({
       type: 'quantomo',
       id: s.id,
       label: s.title,
       via: 'quantomo.entry_id:sealed',
+      entry_id: q.entry_id,
+      source_kind: meta.source_kind ?? null,
+      timestamp_exact: meta.timestamp_exact ?? null,
+      locator: notebookLocator(s.id),
     })
   }
 
@@ -347,31 +406,36 @@ function neighborsForQuantomo(quantomoId: string): NeighborLine[] {
 
   for (const l of linked) {
     if (!l.name) continue
+    const meta = sourceMetaForEntry(q.entry_id)
     out.push({
       type: l.entity_kind,
       id: l.entity_id,
       label: l.name,
       via: `entity_links:${q.entry_id}`,
+      entry_id: q.entry_id,
+      source_kind: meta.source_kind ?? null,
+      timestamp_exact: meta.timestamp_exact ?? null,
     })
   }
   return out
 }
 
-function searchSealedQuantomosFts(query: string, limit: number): OracleSeed[] {
+function searchSealedQuantomosFts(
+  query: string,
+  limit: number,
+): Array<{ id: string; score: number }> {
   const ftsQuery = buildOracleFtsQuery(query)
   if (!ftsQuery) return []
   const db = getDb()
   try {
     const hits = rows<{
       id: string
-      title: string
-      content: string | null
       rank: number
     }>(
       db
         .prepare(
           `
-        SELECT q.id, q.title, q.content, bm25(quantomos_fts) AS rank
+        SELECT q.id, bm25(quantomos_fts) AS rank
         FROM quantomos_fts f
         JOIN quantomos q ON q.id = f.quantomo_id
         WHERE quantomos_fts MATCH ?
@@ -384,16 +448,32 @@ function searchSealedQuantomosFts(query: string, limit: number): OracleSeed[] {
         .all(ftsQuery, limit),
     )
     return hits.map((h) => ({
-      type: 'quantomo' as const,
       id: h.id,
-      label: h.title,
-      snippet: (h.content ?? '').slice(0, ORACLE_QUANTOMO_SNIPPET),
-      score: Math.min(0.85, Math.max(0.35, 0.85 + h.rank * 0.05)),
+      score: bm25ToUnit(h.rank),
     }))
   } catch (err) {
     console.warn('[oracle] quantomos FTS:', err)
     return []
   }
+}
+
+function latticeScoresFor(ids: string[]): Map<string, number> {
+  const out = new Map<string, number>()
+  if (ids.length === 0) return out
+  const db = getDb()
+  const placeholders = ids.map(() => '?').join(',')
+  const rowsL = rows<{ quantomo_id: string; premium: number }>(
+    db
+      .prepare(
+        `SELECT quantomo_id, premium FROM quantomo_lattices
+         WHERE quantomo_id IN (${placeholders})`,
+      )
+      .all(...ids),
+  )
+  for (const r of rowsL) {
+    out.set(r.quantomo_id, r.premium === 1 ? 1 : 0.7)
+  }
+  return out
 }
 
 function collectNeighbors(seeds: OracleSeed[]): OracleNeighbor[] {
@@ -442,44 +522,73 @@ export async function retrieveOracleContext(
     }
   }
 
-  const hits = await searchSimilar(q, {
-    types: ['quantomo', 'person', 'project'],
-    limit: ORACLE_SEED_LIMIT,
-  })
+  const embedByKey = new Map<string, number>()
+  if (!embedError) {
+    const hits = await searchSimilar(q, {
+      types: ['quantomo', 'person', 'project'],
+      limit: ORACLE_SEED_LIMIT,
+    })
+    for (const h of hits) {
+      embedByKey.set(`${h.object_type}:${h.object_id}`, h.score)
+    }
+  }
+
+  const ftsByKey = new Map<string, number>()
+  for (const f of searchSealedQuantomosFts(q, ORACLE_SEED_LIMIT)) {
+    ftsByKey.set(`quantomo:${f.id}`, f.score)
+  }
+
+  const keys = new Set([...embedByKey.keys(), ...ftsByKey.keys()])
+  const quantomoIds = [...keys]
+    .filter((k) => k.startsWith('quantomo:'))
+    .map((k) => k.slice('quantomo:'.length))
+  const latticeById = latticeScoresFor(quantomoIds)
 
   const seeds: OracleSeed[] = []
-  const seen = new Set<string>()
-  for (const h of hits) {
-    const seed = hydrateSeed(h.object_type, h.object_id, h.score)
+  for (const key of keys) {
+    const colon = key.indexOf(':')
+    const type = key.slice(0, colon)
+    const id = key.slice(colon + 1)
+    const embedScore = embedByKey.get(key) ?? null
+    const ftsScore = ftsByKey.get(key) ?? null
+    const latticeScore = type === 'quantomo' ? (latticeById.get(id) ?? null) : null
+    const fused =
+      latticeScore != null
+        ? hybridScore({
+            fts: clampUnit(ftsScore),
+            embedding: clampUnit(embedScore),
+            lattice: latticeScore,
+          })
+        : fuseHybridCandidate({ ftsScore, embedScore })
+    const seed = hydrateSeed(type, id, fused)
     if (!seed || !ragAllowsObjectType(seed.type)) continue
-    const key = `${seed.type}:${seed.id}`
-    if (seen.has(key)) continue
-    seen.add(key)
     seeds.push(seed)
   }
 
-  const hasQuantomo = seeds.some((s) => s.type === 'quantomo')
-  let mode: OracleRagMode = 'semantic'
-  if (!hasQuantomo) {
-    for (const f of searchSealedQuantomosFts(q, ORACLE_SEED_LIMIT)) {
-      const key = `${f.type}:${f.id}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      seeds.push(f)
-    }
-    if (seeds.some((s) => s.type === 'quantomo')) mode = 'fts'
-  }
+  seeds.sort((a, b) => b.score - a.score)
+  const top = seeds.slice(0, ORACLE_SEED_LIMIT)
 
-  if (seeds.length === 0) {
+  const usedEmbed = top.some((s) => embedByKey.has(`${s.type}:${s.id}`))
+  const usedFts = top.some((s) => ftsByKey.has(`${s.type}:${s.id}`))
+  let mode: OracleRagMode = 'none'
+  if (top.length === 0) {
     mode = embedError ? 'embed_down' : 'none'
+  } else if (usedEmbed && usedFts) {
+    mode = 'hybrid'
+  } else if (usedEmbed) {
+    mode = 'semantic'
+  } else if (usedFts) {
+    mode = 'fts'
+  } else if (embedError) {
+    mode = 'embed_down'
   }
 
-  const neighbors = collectNeighbors(seeds)
+  const neighbors = collectNeighbors(top)
   return {
-    block: formatOracleGraphBlock({ mode, embedError, seeds, neighbors }),
+    block: formatOracleGraphBlock({ mode, embedError, seeds: top, neighbors }),
     mode,
     embedError,
-    seeds,
+    seeds: top,
     neighbors,
   }
 }
@@ -1170,65 +1279,84 @@ export function getGraphSnapshot(opts?: {
   }
 }
 
-/** Búsqueda léxica (typeahead) + semántica opcional para zoom en el grafo. */
+async function semanticGraphHits(
+  q: string,
+  limit: number,
+): Promise<ScoredHit[]> {
+  const db = getDb()
+  const hits = await searchSimilar(q, {
+    types: ['person', 'project', 'quantomo'],
+    limit,
+  })
+  const out: ScoredHit[] = []
+  for (const h of hits) {
+    if (h.object_type === 'person') {
+      const p = row<{ name: string }>(
+        db.prepare(`SELECT name FROM persons WHERE id = ?`).get(h.object_id),
+      )
+      if (p) out.push({ id: h.object_id, type: 'person', label: p.name, score: h.score })
+    } else if (h.object_type === 'project') {
+      const p = row<{ title: string }>(
+        db.prepare(`SELECT title FROM projects WHERE id = ?`).get(h.object_id),
+      )
+      if (p) {
+        out.push({
+          id: h.object_id,
+          type: 'project',
+          label: p.title,
+          score: h.score,
+        })
+      }
+    } else if (h.object_type === 'quantomo') {
+      const qq = row<{ title: string }>(
+        db.prepare(`SELECT title FROM quantomos WHERE id = ?`).get(h.object_id),
+      )
+      if (qq) {
+        out.push({
+          id: h.object_id,
+          type: 'quantomo',
+          label: qq.title,
+          score: h.score,
+        })
+      }
+    }
+  }
+  return out
+}
+
+/** Búsqueda léxica (typeahead) + semántica. Hybrid = unión + max, no fallback. */
 export async function searchGraphNodes(
   query: string,
   limit = 12,
   opts?: { mode?: 'lexical' | 'semantic' | 'hybrid' },
-): Promise<Array<{ id: string; type: string; label: string; score: number }>> {
+): Promise<ScoredHit[]> {
   const q = query.trim()
   if (!q) return []
   const mode = opts?.mode ?? 'lexical'
-  const db = getDb()
+  const cap = Math.max(1, limit)
 
-  const out: Array<{ id: string; type: string; label: string; score: number }> =
-    []
-  const seen = new Set<string>()
+  const lexical: ScoredHit[] =
+    mode === 'lexical' || mode === 'hybrid'
+      ? typeaheadEntities(q, {
+          kinds: ['person', 'project', 'quantomo'],
+          limit: cap,
+          scope: 'all',
+        }).map((h) => ({
+          id: h.id,
+          type: h.kind,
+          label: h.label,
+          score: h.score,
+        }))
+      : []
 
-  const push = (id: string, type: string, label: string, score: number) => {
-    if (seen.has(id)) return
-    seen.add(id)
-    out.push({ id, type, label, score })
+  if (mode === 'lexical') {
+    return lexical.sort((a, b) => b.score - a.score).slice(0, cap)
   }
 
-  if (mode === 'lexical' || mode === 'hybrid') {
-    const lexical = typeaheadEntities(q, {
-      kinds: ['person', 'project', 'quantomo'],
-      limit,
-      scope: 'all',
-    })
-    for (const h of lexical) {
-      push(h.id, h.kind, h.label, h.score)
-    }
+  const semantic = await semanticGraphHits(q, cap)
+  if (mode === 'semantic') {
+    return semantic.sort((a, b) => b.score - a.score).slice(0, cap)
   }
 
-  const wantSemantic =
-    mode === 'semantic' || (mode === 'hybrid' && out.length === 0)
-
-  if (wantSemantic) {
-    const hits = await searchSimilar(q, {
-      types: ['person', 'project', 'quantomo'],
-      limit,
-    })
-    for (const h of hits) {
-      if (h.object_type === 'person') {
-        const p = row<{ name: string }>(
-          db.prepare(`SELECT name FROM persons WHERE id = ?`).get(h.object_id),
-        )
-        if (p) push(h.object_id, 'person', p.name, h.score)
-      } else if (h.object_type === 'project') {
-        const p = row<{ title: string }>(
-          db.prepare(`SELECT title FROM projects WHERE id = ?`).get(h.object_id),
-        )
-        if (p) push(h.object_id, 'project', p.title, h.score)
-      } else if (h.object_type === 'quantomo') {
-        const qq = row<{ title: string }>(
-          db.prepare(`SELECT title FROM quantomos WHERE id = ?`).get(h.object_id),
-        )
-        if (qq) push(h.object_id, 'quantomo', qq.title, h.score)
-      }
-    }
-  }
-
-  return out.sort((a, b) => b.score - a.score).slice(0, limit)
+  return mergeHybridHits(lexical, semantic, cap)
 }

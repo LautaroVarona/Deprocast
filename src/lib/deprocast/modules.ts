@@ -98,6 +98,18 @@ export const MODULE_CATALOG: DeproModule[] = [
     suggestedAgentIds: ['visionario', 'exegeta'],
   },
   {
+    id: 'conocimiento',
+    label: 'Conocimiento / referentes',
+    does: 'Repos GitHub (URL o a mano) con vectores de utilidad. Esquema polimórfico para papers, leyes y curriculum. Ancla AmazonA. Destila protoquántomos con voto 1–12.',
+    files: 'ConocimientoSection, knowledge.ts, knowledgeGithub.ts, knowledgeStack.ts',
+    ipo: {
+      input: 'URL github.com/owner/repo o ficha manual.',
+      processing: 'API GitHub + stack + LLM utilidad + HITL.',
+      output: 'knowledge_entity + protoquántomos opcionales.',
+    },
+    suggestedAgentIds: ['mnemosyne', 'link-crawler', 'destilador'],
+  },
+  {
     id: 'chats',
     label: 'Chats · import',
     does: 'Import .txt WhatsApp/redes, bloques por día, destilado. No es el chat del producto.',

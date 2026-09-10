@@ -27,6 +27,13 @@ function isAcceptedAudio(file: File): boolean {
   return false
 }
 
+function queueStatusLabel(status: string): string {
+  if (status === 'queued') return 'STT'
+  if (status === 'processing') return 'en curso'
+  if (status === 'pending_extract') return 'extract'
+  return status.replace(/_/g, ' ')
+}
+
 interface Props {
   onProcessed: () => void
   onChanged?: () => void
@@ -41,6 +48,8 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
   const [busy, setBusy] = useState(false)
   const [paused, setPaused] = useState(false)
   const [running, setRunning] = useState(false)
+  const [pipelineLabel, setPipelineLabel] = useState<string | null>(null)
+  const [currentTitle, setCurrentTitle] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -57,6 +66,8 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
       setQueued(data.entries)
       setPaused(pipe.paused)
       setRunning(pipe.running)
+      setPipelineLabel(pipe.stageLabel || null)
+      setCurrentTitle(pipe.currentTitle)
     } catch (err) {
       console.error(err)
     } finally {
@@ -66,9 +77,10 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
 
   useEffect(() => {
     void refreshQueued()
-    const id = window.setInterval(() => void refreshQueued(), 5000)
+    const ms = running || busy ? 1500 : 5000
+    const id = window.setInterval(() => void refreshQueued(), ms)
     return () => window.clearInterval(id)
-  }, [refreshQueued])
+  }, [refreshQueued, running, busy])
 
   function onPick(files: FileList | null) {
     if (!files) return
@@ -107,6 +119,8 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
     setError(null)
     setStatus(null)
 
+    const uploadErrors: string[] = []
+    let jumped = false
     try {
       if (selected.length > 0) {
         const files = [...selected]
@@ -122,33 +136,49 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
           const mb = (f.size / (1024 * 1024)).toFixed(1)
           setStatus(`Subiendo ${i + 1}/${files.length}: ${f.name} (${mb} MB)`)
           console.log(`[freezone] upload ${i + 1}/${files.length}`, f.name, mb)
-          const result = await api.ingestAudioOne(f, meta)
-          const expectedTitle = f.name.replace(/\.[^.]+$/, '')
-          const hit = result.entries.find((e) => e.title === expectedTitle)
-          if (!hit) {
-            throw new Error(
-              `«${f.name}» no quedó registrado. Abortando el lote para no perder el resto.`,
+          try {
+            const result = await api.ingestAudioOne(f, meta)
+            const expectedTitle = f.name.replace(/\.[^.]+$/, '')
+            const hit = result.entries.find((e) => e.title === expectedTitle)
+            if (!hit) {
+              uploadErrors.push(`«${f.name}» no quedó registrado`)
+              continue
+            }
+            uploaded += 1
+            setSelected((prev) =>
+              prev.filter((x) => !(x.name === f.name && x.size === f.size)),
+            )
+            void api.runPipeline().catch((err) => {
+              console.warn('[freezone] pipeline kick', err)
+            })
+            await refreshQueued()
+          } catch (fileErr) {
+            uploadErrors.push(
+              `«${f.name}»: ${fileErr instanceof Error ? fileErr.message : 'error'}`,
             )
           }
-          uploaded += 1
-          // quitar de la selección a medida que sube
-          setSelected((prev) =>
-            prev.filter((x) => !(x.name === f.name && x.size === f.size)),
-          )
-          await refreshQueued()
         }
-        setStatus(`Subidos ${uploaded} audio(s). Encolando pipeline…`)
+        setStatus(
+          uploaded > 0
+            ? `Subidos ${uploaded}/${files.length}. Transcripción en marcha — votá en Aduana cuando aparezcan.`
+            : 'No se pudo subir ningún audio',
+        )
         if (inputRef.current) inputRef.current.value = ''
+        jumped = uploaded > 0
+      } else {
+        const pipeline = await api.runPipeline()
+        setPaused(false)
+        setStatus(
+          pipeline.message ||
+            'Cola en marcha — criba en Aduana al transcribir; al votar arranca el extract.',
+        )
+        jumped = true
       }
-
-      const pipeline = await api.runPipeline()
-      setPaused(false)
-      setStatus(
-        pipeline.message ||
-          'Pipeline en marcha — la criba de Aduana aparece al transcribir.',
-      )
       await refreshQueued()
-      onProcessed()
+      if (uploadErrors.length > 0) {
+        setError(uploadErrors.join(' · '))
+      }
+      if (jumped) onProcessed()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al procesar')
     } finally {
@@ -221,9 +251,14 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
     <section className="panel freezone">
       <header className="panel-head">
         <h2>Zona franca</h2>
-        {(paused || running) && (
+        {(paused || running || pipelineLabel) && (
           <p className="muted mono pipeline-state">
-            {paused ? 'pausado' : running ? 'procesando' : ''}
+            {paused
+              ? 'pausado'
+              : running
+                ? [pipelineLabel, currentTitle].filter(Boolean).join(' · ') ||
+                  'procesando'
+                : pipelineLabel || ''}
           </p>
         )}
       </header>
@@ -249,7 +284,7 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
         <p className="dropzone-label">
           Arrastrá o elegí archivos
           <span className="dropzone-exts">
-            .m4a · .mp3 · .ogg · .opus · .aac · .wav
+            .m4a · .mp3 · .ogg · .opus · .aac · .wav — al cargar transcribe solo
           </span>
         </p>
       </div>
@@ -325,7 +360,11 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
           disabled={!canProcess}
           onClick={() => void handleProcess()}
         >
-          {busy ? 'Subiendo / procesando…' : paused ? 'Procesar (reanuda)' : 'Procesar'}
+          {busy
+            ? 'Subiendo…'
+            : selected.length > 0
+              ? 'Cargar y transcribir'
+              : 'Continuar cola'}
         </button>
       </div>
 
@@ -335,7 +374,7 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
       {queued.length > 0 && (
         <div className="queue-block">
           <div className="queue-head">
-            <h3>En cola</h3>
+            <h3>Máquina</h3>
             <button
               type="button"
               className="btn btn-tiny"
@@ -347,7 +386,9 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
           <ul className="queue-list">
             {queued.map((e) => (
               <li key={e.id}>
-                <span className={`badge badge-${e.status}`}>{e.status}</span>
+                <span className={`badge badge-${e.status}`}>
+                  {queueStatusLabel(e.status)}
+                </span>
                 <span className="mono truncate">{e.title}</span>
                 <button
                   type="button"

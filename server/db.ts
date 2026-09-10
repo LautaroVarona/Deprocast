@@ -1132,6 +1132,7 @@ function migrate(database: DatabaseSync): void {
   ensureEntityLinksIndex(database)
   backfillEntityAliases(database)
   backfillProjectAliases(database)
+  ensureKnowledgeTables(database)
   ensureSearchFts(database)
   backfillCurrentRun(database)
   seedAppSettings(database)
@@ -1246,6 +1247,97 @@ function backfillValidatedFileMetadata(database: DatabaseSync): void {
   }
 }
 
+function ensureKnowledgeTables(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_entities (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      authors_org TEXT NOT NULL DEFAULT '',
+      source_url TEXT,
+      summary TEXT NOT NULL DEFAULT '',
+      utility_problem TEXT NOT NULL DEFAULT '',
+      architecture_tldr TEXT NOT NULL DEFAULT '',
+      use_cases TEXT NOT NULL DEFAULT '',
+      captured_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ready',
+      capture_error TEXT,
+      weight INTEGER,
+      distilled_at TEXT,
+      domain_ids TEXT NOT NULL DEFAULT '[]',
+      tags TEXT NOT NULL DEFAULT '[]',
+      notes TEXT NOT NULL DEFAULT '',
+      capture_mode TEXT NOT NULL DEFAULT 'manual',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_entities_kind
+      ON knowledge_entities(kind);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_entities_status
+      ON knowledge_entities(status, captured_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_entities_url
+      ON knowledge_entities(source_url)
+      WHERE source_url IS NOT NULL AND source_url != '';
+
+    CREATE TABLE IF NOT EXISTS knowledge_repos (
+      entity_id TEXT PRIMARY KEY REFERENCES knowledge_entities(id) ON DELETE CASCADE,
+      owner TEXT NOT NULL DEFAULT '',
+      repo_name TEXT NOT NULL DEFAULT '',
+      default_branch TEXT,
+      license TEXT,
+      description_upstream TEXT NOT NULL DEFAULT '',
+      stack_json TEXT NOT NULL DEFAULT '{}',
+      stack_tags TEXT NOT NULL DEFAULT '[]',
+      languages_json TEXT NOT NULL DEFAULT '{}',
+      topics_json TEXT NOT NULL DEFAULT '[]',
+      last_commit_at TEXT,
+      open_issues INTEGER,
+      stars INTEGER,
+      archived INTEGER NOT NULL DEFAULT 0,
+      pushed_at TEXT,
+      readme_vault_path TEXT,
+      github_snapshot_json TEXT NOT NULL DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge_papers (
+      entity_id TEXT PRIMARY KEY REFERENCES knowledge_entities(id) ON DELETE CASCADE,
+      doi TEXT,
+      authors_json TEXT NOT NULL DEFAULT '[]',
+      abstract TEXT NOT NULL DEFAULT '',
+      year INTEGER,
+      venue TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge_legal (
+      entity_id TEXT PRIMARY KEY REFERENCES knowledge_entities(id) ON DELETE CASCADE,
+      jurisdiction TEXT,
+      bulletin TEXT,
+      articles_json TEXT NOT NULL DEFAULT '[]',
+      effective_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge_books (
+      entity_id TEXT PRIMARY KEY REFERENCES knowledge_entities(id) ON DELETE CASCADE,
+      isbn TEXT,
+      authors_json TEXT NOT NULL DEFAULT '[]',
+      year INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge_anchors (
+      id TEXT PRIMARY KEY,
+      entity_id TEXT NOT NULL REFERENCES knowledge_entities(id) ON DELETE CASCADE,
+      matrix_id TEXT NOT NULL,
+      row_item_id TEXT NOT NULL,
+      col_item_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'conocimiento',
+      created_at TEXT NOT NULL,
+      UNIQUE(entity_id, matrix_id, row_item_id, col_item_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_anchors_entity
+      ON knowledge_anchors(entity_id);
+  `)
+}
+
 function ensureColumn(
   database: DatabaseSync,
   table: string,
@@ -1321,6 +1413,8 @@ function remapaNotebookPageLayout(database: DatabaseSync): void {
 /**
  * Prueba: si no hay fecha parseable en nombre ni en transcripción,
  * fija timestamp_exact al 3 de marzo de 2026 (entradas aún no validadas).
+ * Si el nombre ahora sí parsea y seguía en fallback (formatos nuevos de grabadora),
+ * reescribe la fecha.
  */
 function backfillUnclearTimestamps(database: DatabaseSync): void {
   const rows = database
@@ -1340,20 +1434,32 @@ function backfillUnclearTimestamps(database: DatabaseSync): void {
   const upd = database.prepare(
     `UPDATE entries SET timestamp_exact = ? WHERE id = ?`,
   )
-  let n = 0
+  let nFallback = 0
+  let nFromName = 0
   for (const row of rows) {
     const name = row.original_filename || row.title
     const clear =
       parseFromFilename(name, 2026) ||
       parseFromTranscript(row.content_raw ?? '', 2026)
-    if (clear) continue
+    if (clear) {
+      if (row.timestamp_exact === FALLBACK_TIMESTAMP) {
+        upd.run(clear, row.id)
+        nFromName++
+      }
+      continue
+    }
     if (row.timestamp_exact === FALLBACK_TIMESTAMP) continue
     upd.run(FALLBACK_TIMESTAMP, row.id)
-    n++
+    nFallback++
   }
-  if (n > 0) {
+  if (nFromName > 0) {
     console.log(
-      `[db] backfill unclear timestamps → 2026-03-03 (${n} entries)`,
+      `[db] backfill filename timestamps (antes fallback) (${nFromName} entries)`,
+    )
+  }
+  if (nFallback > 0) {
+    console.log(
+      `[db] backfill unclear timestamps → 2026-03-03 (${nFallback} entries)`,
     )
   }
 }
@@ -2112,6 +2218,12 @@ function ensureSearchFts(database: DatabaseSync): void {
       body,
       tokenize = 'unicode61'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+      entity_id UNINDEXED,
+      title,
+      body,
+      tokenize = 'unicode61'
+    );
   `)
 
   // Triggers solo para quántomos (personas/proyectos se sincronizan vía sync*Aliases).
@@ -2138,6 +2250,42 @@ function ensureSearchFts(database: DatabaseSync): void {
     END;
     CREATE TRIGGER quantomos_fts_ad AFTER DELETE ON quantomos BEGIN
       DELETE FROM quantomos_fts WHERE quantomo_id = old.id;
+    END;
+    DROP TRIGGER IF EXISTS knowledge_fts_ai;
+    DROP TRIGGER IF EXISTS knowledge_fts_au;
+    DROP TRIGGER IF EXISTS knowledge_fts_ad;
+    CREATE TRIGGER knowledge_fts_ai AFTER INSERT ON knowledge_entities BEGIN
+      INSERT INTO knowledge_fts(entity_id, title, body)
+      VALUES (
+        new.id,
+        new.title,
+        substr(replace(
+          coalesce(new.summary, '') || ' ' ||
+          coalesce(new.utility_problem, '') || ' ' ||
+          coalesce(new.architecture_tldr, '') || ' ' ||
+          coalesce(new.use_cases, ''),
+          char(10), ' '
+        ), 1, 1200)
+      );
+    END;
+    CREATE TRIGGER knowledge_fts_au AFTER UPDATE OF title, summary, utility_problem, architecture_tldr, use_cases
+    ON knowledge_entities BEGIN
+      DELETE FROM knowledge_fts WHERE entity_id = old.id;
+      INSERT INTO knowledge_fts(entity_id, title, body)
+      VALUES (
+        new.id,
+        new.title,
+        substr(replace(
+          coalesce(new.summary, '') || ' ' ||
+          coalesce(new.utility_problem, '') || ' ' ||
+          coalesce(new.architecture_tldr, '') || ' ' ||
+          coalesce(new.use_cases, ''),
+          char(10), ' '
+        ), 1, 1200)
+      );
+    END;
+    CREATE TRIGGER knowledge_fts_ad AFTER DELETE ON knowledge_entities BEGIN
+      DELETE FROM knowledge_fts WHERE entity_id = old.id;
     END;
   `)
 
@@ -2170,6 +2318,26 @@ export function rebuildSearchFts(database: DatabaseSync = getDb()): void {
       substr(replace(coalesce(content, ''), char(10), ' '), 1, 800)
     FROM quantomos
   `)
+
+  try {
+    database.exec(`DELETE FROM knowledge_fts`)
+    database.exec(`
+      INSERT INTO knowledge_fts(entity_id, title, body)
+      SELECT
+        id,
+        title,
+        substr(replace(
+          coalesce(summary, '') || ' ' ||
+          coalesce(utility_problem, '') || ' ' ||
+          coalesce(architecture_tldr, '') || ' ' ||
+          coalesce(use_cases, ''),
+          char(10), ' '
+        ), 1, 1200)
+      FROM knowledge_entities
+    `)
+  } catch {
+    /* knowledge_fts puede no existir en backups viejos a medias */
+  }
 }
 
 export function ensureTrincheraSeed(): void {

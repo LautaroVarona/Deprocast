@@ -8,6 +8,7 @@ export type JobFamily =
   | 'notebook_vision'
   | 'notebook_source'
   | 'research'
+  | 'knowledge'
 
 export type JobStatus =
   | 'queued'

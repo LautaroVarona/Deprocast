@@ -38,7 +38,10 @@ import {
   parseMentionedEntities,
   splitExplanation,
 } from '../services/notebookProcess.js'
-import { streamNotebookExportZip } from '../services/notebookExport.js'
+import {
+  streamNotebookExportJson,
+  streamNotebookExportZip,
+} from '../services/notebookExport.js'
 import { applyEntityMentionTags } from '../services/blobIngest.js'
 import { labelForSlot, mapVisualSlot, TOTAL_FACES } from '../services/notebookLayout.js'
 import {
@@ -229,6 +232,11 @@ notebooksRouter.post('/:id/validate-all-explanations', (req, res) => {
 notebooksRouter.get('/:id/export', (req, res) => {
   try {
     const notebook = requireProductNotebook(req.params.id)
+    const format = String(req.query.format || 'zip').toLowerCase()
+    if (format === 'json') {
+      streamNotebookExportJson(notebook, res)
+      return
+    }
     streamNotebookExportZip(notebook, res)
   } catch (err) {
     const e = err as Error & { status?: number }

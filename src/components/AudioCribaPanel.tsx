@@ -24,7 +24,7 @@ import type {
   Entry,
   SpeakerAssignment,
 } from '../types'
-import { mentionKindLabel, MentionMenu, type MentionMenuHit } from './MentionMenu'
+import { mentionKindLabel, MentionMenu, isMentionTagged, orderMentionHits, stepSelectableMentionIdx, type MentionMenuHit } from './MentionMenu'
 import { SpeakerBadge } from './SpeakerBadge'
 import { TagField } from './TagField'
 
@@ -387,6 +387,10 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     () => new Set(tags.map((t) => tagKey(t))),
     [tags],
   )
+  const menuHits = useMemo(
+    () => orderMentionHits(mentionHits, taggedIds),
+    [mentionHits, taggedIds],
+  )
 
   const karaokeIdx = useMemo(
     () => activeBlockIndex(blocks, playback.currentTime),
@@ -463,6 +467,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
   const applyTranscriptMention = useCallback(
     (hit: MentionMenuHit, multi = false) => {
       if (mentionBlock == null || !mentionRange) return
+      if (isMentionTagged(hit, taggedIds)) return
       if (!isTagKind(hit.kind)) return
       const block = blocks[mentionBlock]
       const ta = blockTaRefs.current[mentionBlock]
@@ -504,7 +509,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
         }
       })
     },
-    [mentionBlock, mentionRange, blocks, tags, runMentionSearch],
+    [mentionBlock, mentionRange, blocks, tags, taggedIds, runMentionSearch],
   )
 
   const onBlockChange = (blockIdx: number, value: string) => {
@@ -536,21 +541,25 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
     if (!mentionOpen || mentionBlock !== blockIdx) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx((i) => (i + 1) % mentionHits.length)
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, 1, taggedIds),
+        )
       }
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx((i) => (i - 1 + mentionHits.length) % mentionHits.length)
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, -1, taggedIds),
+        )
       }
       return
     }
-    if ((e.key === 'Enter' || e.key === 'Tab') && mentionHits.length > 0) {
+    if ((e.key === 'Enter' || e.key === 'Tab') && menuHits.length > 0) {
       e.preventDefault()
-      applyTranscriptMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+      applyTranscriptMention(menuHits[mentionIdx]!, e.ctrlKey || e.metaKey)
     }
     if (e.key === 'Escape') {
       e.preventDefault()
@@ -983,7 +992,7 @@ export function AudioCribaPanel({ refreshKey, onChanged }: Props) {
           </div>
           <MentionMenu
             open={mentionOpen}
-            hits={mentionHits}
+            hits={menuHits}
             activeIdx={mentionIdx}
             busy={mentionBusy}
             anchor={mentionAnchor}

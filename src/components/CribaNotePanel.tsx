@@ -9,7 +9,13 @@ import {
 } from 'react'
 import { api } from '../services/api'
 import type { Bookmark, BookmarkManualTag } from '../types'
-import { MentionMenu, type MentionMenuHit } from './MentionMenu'
+import {
+  isMentionTagged,
+  MentionMenu,
+  orderMentionHits,
+  stepSelectableMentionIdx,
+  type MentionMenuHit,
+} from './MentionMenu'
 import { getTextareaCaretRect } from '../lib/textareaCaret'
 
 type Props = {
@@ -243,10 +249,20 @@ export function CribaNotePanel({ bookmark, onUpdated }: Props) {
     setMentionAnchor(getTextareaCaretRect(ta, offset ?? ta.selectionStart))
   }, [])
 
+  const taggedIds = useMemo(
+    () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
+    [tags],
+  )
+  const menuHits = useMemo(
+    () => orderMentionHits(mentionHits, taggedIds),
+    [mentionHits, taggedIds],
+  )
+
   const applyMention = useCallback(
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (isMentionTagged(hit, taggedIds)) return
       const before = note.slice(0, mentionRange.start)
       const after = note.slice(mentionRange.end)
       const insert = multi ? `@${hit.entity_name} @` : `@${hit.entity_name} `
@@ -283,7 +299,15 @@ export function CribaNotePanel({ bookmark, onUpdated }: Props) {
         if (multi) syncMentionAnchor(caret)
       })
     },
-    [mentionRange, note, tags, scheduleSave, runMentionSearch, syncMentionAnchor],
+    [
+      mentionRange,
+      note,
+      tags,
+      taggedIds,
+      scheduleSave,
+      runMentionSearch,
+      syncMentionAnchor,
+    ],
   )
 
   const removeTag = (tag: BookmarkManualTag) => {
@@ -314,20 +338,24 @@ export function CribaNotePanel({ bookmark, onUpdated }: Props) {
   }
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (!mentionOpen || mentionHits.length === 0) return
+    if (!mentionOpen || menuHits.length === 0) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setMentionIdx((i) => (i + 1) % mentionHits.length)
+      setMentionIdx((i) =>
+        stepSelectableMentionIdx(menuHits, i, 1, taggedIds),
+      )
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      setMentionIdx((i) => (i - 1 + mentionHits.length) % mentionHits.length)
+      setMentionIdx((i) =>
+        stepSelectableMentionIdx(menuHits, i, -1, taggedIds),
+      )
       return
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault()
-      applyMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+      applyMention(menuHits[mentionIdx]!, e.ctrlKey || e.metaKey)
       return
     }
     if (e.key === 'Escape') {
@@ -349,10 +377,6 @@ export function CribaNotePanel({ bookmark, onUpdated }: Props) {
   }, [note, open, mentionOpen, syncMentionAnchor])
 
   const hasContent = Boolean(note.trim() || tags.length > 0)
-  const taggedIds = useMemo(
-    () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
-    [tags],
-  )
   const statusLabel =
     saveState === 'saving'
       ? 'guardando…'
@@ -405,7 +429,7 @@ export function CribaNotePanel({ bookmark, onUpdated }: Props) {
             />
             <MentionMenu
               open={mentionOpen}
-              hits={mentionHits}
+              hits={menuHits}
               activeIdx={mentionIdx}
               busy={mentionBusy}
               anchor={mentionAnchor}

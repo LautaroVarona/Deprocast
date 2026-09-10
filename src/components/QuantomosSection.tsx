@@ -5,6 +5,8 @@ import { downloadJson } from '../utils/downloadJson'
 
 interface Props {
   refreshKey: number
+  focusId?: string | null
+  onFocusConsumed?: () => void
 }
 
 type QuantomoRow = Quantomo & {
@@ -36,6 +38,8 @@ function sourceKindLabel(kind: string | null | undefined): string {
       return 'Blob'
     case 'bookmark':
       return 'Bookmark'
+    case 'knowledge':
+      return 'Conocimiento'
     case 'manual':
       return 'Manual'
     default:
@@ -58,7 +62,11 @@ function formatTs(iso: string | null): string {
   })
 }
 
-export function QuantomosSection({ refreshKey }: Props) {
+export function QuantomosSection({
+  refreshKey,
+  focusId = null,
+  onFocusConsumed,
+}: Props) {
   const [pane, setPane] = useState<Pane>('quantomos')
   const [quantomos, setQuantomos] = useState<QuantomoRow[]>([])
   const [universes, setUniverses] = useState<
@@ -126,6 +134,17 @@ export function QuantomosSection({ refreshKey }: Props) {
   useEffect(() => {
     void load()
   }, [load, refreshKey])
+
+  useEffect(() => {
+    if (!focusId) return
+    setSelectedId(focusId)
+    setStageFilter('all')
+    setSourceKindFilter('all')
+    setUniverseFilter('all')
+    setQuery('')
+    setPane('quantomos')
+    onFocusConsumed?.()
+  }, [focusId, onFocusConsumed])
 
   useEffect(() => {
     if (!selectedId) {
@@ -218,6 +237,7 @@ export function QuantomosSection({ refreshKey }: Props) {
     downloadJson(`deprocast-quantomos-${day}.json`, {
       exported_at: new Date().toISOString(),
       source: 'deprocast-quantomos',
+      stage: stageFilter,
       count: filtered.length,
       avg_weight: avgWeight,
       universes,

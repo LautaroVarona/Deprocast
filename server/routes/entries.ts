@@ -420,7 +420,7 @@ entriesRouter.post('/:entryId/weight', async (req, res) => {
   )
 
   try {
-    await enqueuePipeline([entryId])
+    await enqueuePipeline([entryId], { unpause: false })
   } catch (err) {
     console.error('[entries/weight] enqueue', err)
   }

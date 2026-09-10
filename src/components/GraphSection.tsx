@@ -610,10 +610,7 @@ export function GraphSection({ refreshKey, onChanged, mode = '2d' }: Props) {
     setSearchBusy(true)
     setError(null)
     try {
-      let res = await api.searchGraphNodes(q, 10, { mode: 'lexical' })
-      if (res.results.length === 0) {
-        res = await api.searchGraphNodes(q, 10, { mode: 'semantic' })
-      }
+      const res = await api.searchGraphNodes(q, 10, { mode: 'hybrid' })
       const ids = new Set(res.results.map((r) => r.id))
       if (ids.size === 0) {
         setError('Sin coincidencias para esa query')

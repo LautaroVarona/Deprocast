@@ -168,7 +168,7 @@ export function BibliotecaSection({
   const [explaining, setExplaining] = useState(false)
   const [sendingCorpus, setSendingCorpus] = useState(false)
   const [convertingL72, setConvertingL72] = useState(false)
-  const [exporting, setExporting] = useState(false)
+  const [exporting, setExporting] = useState<'zip' | 'json' | null>(null)
   const [readModalOpen, setReadModalOpen] = useState(false)
   const [readModalMinimized, setReadModalMinimized] = useState(false)
   const titleInputRef = useRef<HTMLInputElement>(null)
@@ -477,16 +477,20 @@ export function BibliotecaSection({
     }
   }
 
-  const startExport = async () => {
+  const startExport = async (format: 'zip' | 'json') => {
     if (!selectedId) return
-    setExporting(true)
+    setExporting(format)
     setError(null)
     try {
-      await api.exportNotebook(selectedId, selected?.title || 'cuaderno')
+      await api.exportNotebook(
+        selectedId,
+        selected?.title || 'cuaderno',
+        format,
+      )
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al exportar')
     } finally {
-      setExporting(false)
+      setExporting(null)
     }
   }
 
@@ -880,10 +884,20 @@ export function BibliotecaSection({
             <button
               type="button"
               className="btn btn-tiny"
-              disabled={exporting}
-              onClick={() => void startExport()}
+              disabled={exporting !== null}
+              title="ZIP con carpeta por hoja: imagen + JSON"
+              onClick={() => void startExport('zip')}
             >
-              {exporting ? 'Exportando…' : 'Exportar'}
+              {exporting === 'zip' ? 'Exportando…' : 'Exportar ZIP'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              disabled={exporting !== null}
+              title="Un solo JSON con todas las hojas, corpus e imágenes en base64"
+              onClick={() => void startExport('json')}
+            >
+              {exporting === 'json' ? 'Exportando…' : 'Exportar JSON'}
             </button>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { BrandNav, type AppView } from './components/BrandNav'
 import { FreeZone } from './components/FreeZone'
 import { CustomsPanel } from './components/CustomsPanel'
 import { ValidatedSection } from './components/ValidatedSection'
@@ -7,6 +8,7 @@ import { QuantomosSection } from './components/QuantomosSection'
 import { GraphWorkspace } from './components/GraphWorkspace'
 import { CribaPanel } from './components/CribaPanel'
 import { BibliotecaSection } from './components/BibliotecaSection'
+import { ConocimientoSection } from './components/ConocimientoSection'
 import { ChatsSection } from './components/ChatsSection'
 import { RespaldoSection } from './components/RespaldoSection'
 import { ConfiguracionSection } from './components/ConfiguracionSection'
@@ -27,10 +29,7 @@ import { AppFooter } from './components/AppFooter'
 import { DeprocastApp } from './components/deprocast/DeprocastApp'
 import { api } from './services/api'
 import { isDeprocastPath, navigate, usePathname } from './lib/path'
-import {
-  LiveSessionProvider,
-  useLiveSession,
-} from './live/LiveSessionContext'
+import { LiveSessionProvider } from './live/LiveSessionContext'
 import type { AppRun } from './types'
 
 const AlephSection = lazy(() =>
@@ -39,53 +38,7 @@ const AlephSection = lazy(() =>
   })),
 )
 
-type View =
-  | 'dashboard'
-  | 'franca'
-  | 'directo'
-  | 'aduana'
-  | 'validada'
-  | 'entidades'
-  | 'quantomos'
-  | 'grafo'
-  | 'criba'
-  | 'biblioteca'
-  | 'chats'
-  | 'dialogo'
-  | 'sentinela'
-  | 'respaldo'
-  | 'configuracion'
-  | 'calendario'
-  | 'amazona'
-  | 'mapa'
-  | 'atlas'
-  | 'aleph'
-
-function DirectoNavButton({
-  active,
-  onClick,
-}: {
-  active: boolean
-  onClick: () => void
-}) {
-  const { status } = useLiveSession()
-  const listening = status === 'listening'
-  return (
-    <button
-      type="button"
-      className={
-        active
-          ? `btn btn-tiny is-nav-active${listening ? ' is-live-listening' : ''}`
-          : `btn btn-tiny${listening ? ' is-live-listening' : ''}`
-      }
-      onClick={onClick}
-      title={listening ? 'Directo · escuchando' : 'Directo'}
-    >
-      Directo
-      {listening && <span className="nav-live-pulse" aria-hidden />}
-    </button>
-  )
-}
+type View = AppView
 
 export default function App() {
   const path = usePathname()
@@ -101,6 +54,8 @@ export default function App() {
   const [entityMode, setEntityMode] = useState<EntityHubMode>('perfiles')
   const [dialogoThreadId, setDialogoThreadId] = useState<string | null>(null)
   const [dialogoSeed, setDialogoSeed] = useState<string | null>(null)
+  const [quantomoFocusId, setQuantomoFocusId] = useState<string | null>(null)
+  const [validatedFocusId, setValidatedFocusId] = useState<string | null>(null)
   const [atlasFocusId, setAtlasFocusId] = useState<string | null>(null)
   const preferHome = useRef(true)
   const sawPending = useRef(false)
@@ -195,11 +150,9 @@ export default function App() {
     }
   }, [checkPending, run])
 
-  const navClass = (id: View) =>
-    view === id ? 'btn btn-tiny is-nav-active' : 'btn btn-tiny'
-
   const go = (id: View, stayHome = false) => {
     preferHome.current = stayHome
+    if (id === 'dialogo') setDialogoSeed(null)
     setView(id)
   }
 
@@ -306,165 +259,14 @@ export default function App() {
             <span className="muted mono">desde {runStartLabel}</span>
           </div>
         </div>
-        <nav className="brand-nav">
-          <button
-            type="button"
-            className={navClass('dashboard')}
-            onClick={() => go('dashboard', true)}
-          >
-            Dashboard
-          </button>
-          <button
-            type="button"
-            className={navClass('franca')}
-            onClick={() => go('franca', true)}
-          >
-            Zona franca
-          </button>
-          <DirectoNavButton
-            active={view === 'directo'}
-            onClick={() => go('directo', true)}
-          />
-          <button
-            type="button"
-            className={navClass('aduana')}
-            onClick={() => go('aduana', false)}
-          >
-            Aduana
-            {aduanaHot && (
-              <span className="nav-badge">
-                {pipelineRunning ? '●' : '!'}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            className={navClass('criba')}
-            onClick={() => go('criba', true)}
-          >
-            Criba
-          </button>
-          <button
-            type="button"
-            className={navClass('biblioteca')}
-            onClick={() => go('biblioteca', true)}
-          >
-            Biblioteca
-          </button>
-          <button
-            type="button"
-            className={navClass('dialogo')}
-            onClick={() => {
-              setDialogoSeed(null)
-              go('dialogo', true)
-            }}
-          >
-            Diálogo
-          </button>
-          <button
-            type="button"
-            className={navClass('sentinela')}
-            onClick={() => go('sentinela', true)}
-          >
-            Sentinela
-          </button>
-          <button
-            type="button"
-            className={navClass('chats')}
-            title="Import de WhatsApp / redes"
-            onClick={() => go('chats', true)}
-          >
-            Chats · import
-          </button>
-          <button
-            type="button"
-            className={navClass('validada')}
-            onClick={() => go('validada', true)}
-          >
-            Validada
-          </button>
-          <button
-            type="button"
-            className={navClass('calendario')}
-            onClick={() => go('calendario', true)}
-          >
-            Calendario
-          </button>
-          <button
-            type="button"
-            className={navClass('amazona')}
-            onClick={() => go('amazona', true)}
-          >
-            AmazonA
-          </button>
-          <button
-            type="button"
-            className={navClass('mapa')}
-            onClick={() => go('mapa', true)}
-          >
-            Mapa
-          </button>
-          <button
-            type="button"
-            className={navClass('atlas')}
-            onClick={() => go('atlas', true)}
-          >
-            Atlas
-          </button>
-          <button
-            type="button"
-            className={navClass('aleph')}
-            onClick={() => go('aleph', true)}
-          >
-            Aleph
-          </button>
-          <button
-            type="button"
-            className={navClass('entidades')}
-            onClick={() => go('entidades', true)}
-          >
-            Entidades
-            {entityPending > 0 && (
-              <span className="nav-badge">{entityPending}</span>
-            )}
-          </button>
-          <button
-            type="button"
-            className={navClass('quantomos')}
-            onClick={() => go('quantomos', true)}
-          >
-            Quántomos
-          </button>
-          <button
-            type="button"
-            className={navClass('grafo')}
-            onClick={() => go('grafo', true)}
-          >
-            Grafo
-          </button>
-          <button
-            type="button"
-            className={navClass('respaldo')}
-            onClick={() => go('respaldo', true)}
-          >
-            Respaldo
-          </button>
-          <button
-            type="button"
-            className={navClass('configuracion')}
-            onClick={() => go('configuracion', true)}
-          >
-            Config
-          </button>
-          <button
-            type="button"
-            className="btn btn-tiny"
-            title="Núcleo Deprocast"
-            onClick={() => navigate('/deprocast')}
-          >
-            Núcleo
-          </button>
-        </nav>
+        <BrandNav
+          view={view}
+          onGo={go}
+          onPath={navigate}
+          aduanaHot={aduanaHot}
+          pipelineRunning={pipelineRunning}
+          entityPending={entityPending}
+        />
       </header>
 
       <main
@@ -474,6 +276,7 @@ export default function App() {
             : view === 'validada' ||
                 view === 'quantomos' ||
                 view === 'biblioteca' ||
+                view === 'conocimiento' ||
                 view === 'chats' ||
                 view === 'dialogo' ||
                 view === 'sentinela' ||
@@ -509,19 +312,40 @@ export default function App() {
           <CribaPanel refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'biblioteca' ? (
           <BibliotecaSection refreshKey={refreshKey} onChanged={bump} />
+        ) : view === 'conocimiento' ? (
+          <ConocimientoSection refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'dialogo' ? (
           <DialogoSection
             refreshKey={refreshKey}
             initialThreadId={dialogoThreadId}
             seedQuery={dialogoSeed}
             onSeedConsumed={() => setDialogoSeed(null)}
+            onCiteNavigate={(target) => {
+              preferHome.current = true
+              if (target.view === 'quantomos') {
+                setQuantomoFocusId(target.focusId)
+                setView('quantomos')
+                return
+              }
+              if (target.view === 'validada') {
+                setValidatedFocusId(target.entryId)
+                setView('validada')
+                return
+              }
+              setEntityMode(target.mode)
+              setView('entidades')
+            }}
           />
         ) : view === 'sentinela' ? (
           <SentinelSection refreshKey={refreshKey} />
         ) : view === 'chats' ? (
           <ChatsSection refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'validada' ? (
-          <ValidatedSection refreshKey={refreshKey} />
+          <ValidatedSection
+            refreshKey={refreshKey}
+            focusEntryId={validatedFocusId}
+            onFocusConsumed={() => setValidatedFocusId(null)}
+          />
         ) : view === 'entidades' ? (
           <EntityHub
             key={entityMode}
@@ -536,7 +360,11 @@ export default function App() {
             }}
           />
         ) : view === 'quantomos' ? (
-          <QuantomosSection refreshKey={refreshKey} />
+          <QuantomosSection
+            refreshKey={refreshKey}
+            focusId={quantomoFocusId}
+            onFocusConsumed={() => setQuantomoFocusId(null)}
+          />
         ) : view === 'grafo' ? (
           <GraphWorkspace refreshKey={refreshKey} onChanged={bump} />
         ) : view === 'respaldo' ? (

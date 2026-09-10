@@ -118,6 +118,15 @@ const IDA_SEED: Array<{
     agent_ids: ['omnivoro-nucleo'],
     tags: ['feedback', 'nucleo'],
   },
+  {
+    id: 'depro-ida-conocimiento',
+    title: 'Referentes externos (GitHub / corpus)',
+    body: 'knowledge_entities opera para repos (API GitHub + vectores de utilidad + voto 1–12). Falta ingest de papers (DOI/OpenAlex), leyes (BOE) y el motor automático de intersecciones radicales. El mapa AmazonA (fuentes × vectores, saber × saber) ya está sembrado.',
+    stage: 'desarrollo',
+    power_indexes: [32],
+    agent_ids: ['mnemosyne', 'link-crawler'],
+    tags: ['tecnologia'],
+  },
 ]
 
 export function seedDeprocast(db: DatabaseSync): void {
@@ -134,6 +143,7 @@ export function seedDeprocast(db: DatabaseSync): void {
     derecho: 'dom-derecho',
     vitalidad: 'dom-salud',
     cuerpo: 'dom-salud',
+    tecnologia: 'dom-tecnologia',
   }
   for (const item of IDA_SEED) {
     const found = exists.get(item.id) as { id: string } | undefined

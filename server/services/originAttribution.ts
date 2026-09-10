@@ -40,12 +40,12 @@ const MONTH_ALT = Object.keys(MONTHS_ES).join('|')
 
 /** e.g. "3 ago, 14.18.m4a" | "3 ago 14:18" | "03-ago-2026 14.18" */
 const FILENAME_RE = new RegExp(
-  `(\\d{1,2})\\s*(?:de\\s+)?(${MONTH_ALT})\\.?(?:\\s*[,\\-_]?\\s*|\\s+)(?:(\\d{4})\\s+)?(\\d{1,2})[.:](\\d{2})`,
+  `(\\d{1,2})\\s*[.\\-_]*\\s*(?:de\\s+)?(${MONTH_ALT})\\.?(?:\\s*[.,\\-_]?\\s*|\\s+)(?:(\\d{4})\\s*[.\\-_]*\\s*)?(\\d{1,2})[.:](\\d{2})`,
   'i',
 )
 
 const FILENAME_DATE_ONLY_RE = new RegExp(
-  `(\\d{1,2})\\s*(?:de\\s+)?(${MONTH_ALT})(?:\\s*[,\\-_]?\\s*|\\s+)(\\d{4})?`,
+  `(\\d{1,2})\\s*[.\\-_]*\\s*(?:de\\s+)?(${MONTH_ALT})(?:\\s*[.,\\-_]?\\s*|\\s+)(\\d{4})?`,
   'i',
 )
 
@@ -54,14 +54,52 @@ const TRANSCRIPT_RE = new RegExp(
   'i',
 )
 
-function buildIso(
-  day: number,
-  monthIndex: number,
+/**
+ * Grabadoras Android/Samsung, p.ej. 20260901_183207.m4a
+ * También 20260901-183207, 20260901T183207, 20260901183207.
+ */
+const COMPACT_DT_RE = /(\d{4})(\d{2})(\d{2})[_T\-]?(\d{2})(\d{2})(\d{2})(?!\d)/
+
+/** ISO / WhatsApp-ish: 2026-09-01_18-32-07 | 2026-09-01 18:32:07 | 2026/09/01 18.32 */
+const SEPARATED_DT_RE =
+  /(\d{4})[-/.](\d{2})[-/.](\d{2})[ T_](\d{1,2})[:.\-](\d{2})(?:[:.\-](\d{2}))?/
+
+/** Solo día compacto: 20260901, AUD-20260901-WA0001 */
+const COMPACT_DATE_RE = /(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)/
+
+function civilToIso(
   year: number,
+  monthIndex: number,
+  day: number,
   hour: number,
   minute: number,
-): string {
-  const d = new Date(Date.UTC(year, monthIndex, day, hour, minute, 0))
+  second = 0,
+): string | null {
+  if (
+    year < 1990 ||
+    year > 2100 ||
+    monthIndex < 0 ||
+    monthIndex > 11 ||
+    day < 1 ||
+    day > 31 ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59 ||
+    second < 0 ||
+    second > 59
+  ) {
+    return null
+  }
+  // Reloj del archivo = reloj local (como datetime-local en Aduana).
+  const d = new Date(year, monthIndex, day, hour, minute, second)
+  if (
+    d.getFullYear() !== year ||
+    d.getMonth() !== monthIndex ||
+    d.getDate() !== day
+  ) {
+    return null
+  }
   return d.toISOString()
 }
 
@@ -87,30 +125,71 @@ function parseMatch(
   ) {
     return null
   }
-  return buildIso(day, monthIndex, year, hour, minute)
+  return civilToIso(year, monthIndex, day, hour, minute, 0)
+}
+
+function fromCompactMatch(m: RegExpMatchArray): string | null {
+  return civilToIso(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    m[6] !== undefined ? Number(m[6]) : 0,
+  )
+}
+
+function parseCompactDate(base: string, defaultHour = 12): string | null {
+  const m = base.match(COMPACT_DATE_RE)
+  if (!m) return null
+  return civilToIso(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    defaultHour,
+    0,
+    0,
+  )
+}
+
+function filenameStem(filename: string): string {
+  return filename
+    .replace(/\.[^.]+$/, '')
+    .replace(/\s*[·•]\s*parte\s+\d+/i, '')
 }
 
 export function parseFromFilename(
   filename: string,
   defaultYear = 2026,
 ): string | null {
-  const base = filename.replace(/\.[^.]+$/, '')
+  const base = filenameStem(filename)
+
+  const compactDt = base.match(COMPACT_DT_RE)
+  if (compactDt) return fromCompactMatch(compactDt)
+
+  const separatedDt = base.match(SEPARATED_DT_RE)
+  if (separatedDt) return fromCompactMatch(separatedDt)
+
   const withTime = base.match(FILENAME_RE)
   if (withTime) {
     return parseMatch(
-      withTime[1],
-      withTime[2],
+      withTime[1]!,
+      withTime[2]!,
       withTime[3],
       withTime[4],
       withTime[5],
       defaultYear,
     )
   }
+
+  const compactDate = parseCompactDate(base)
+  if (compactDate) return compactDate
+
   const dateOnly = base.match(FILENAME_DATE_ONLY_RE)
   if (dateOnly) {
     return parseMatch(
-      dateOnly[1],
-      dateOnly[2],
+      dateOnly[1]!,
+      dateOnly[2]!,
       dateOnly[3],
       undefined,
       undefined,
@@ -127,7 +206,7 @@ export function parseFromTranscript(
   if (!transcript?.trim()) return null
   const m = transcript.match(TRANSCRIPT_RE)
   if (!m) return null
-  return parseMatch(m[1], m[2], m[3], m[4], m[5], defaultYear)
+  return parseMatch(m[1]!, m[2]!, m[3], m[4], m[5], defaultYear)
 }
 
 export function resolveOriginAttribution(opts: {

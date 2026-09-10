@@ -8,7 +8,13 @@ import {
 } from 'react'
 import { api } from '../services/api'
 import type { BookmarkManualTag } from '../types'
-import { MentionMenu, type MentionMenuHit } from './MentionMenu'
+import {
+  isMentionTagged,
+  MentionMenu,
+  orderMentionHits,
+  stepSelectableMentionIdx,
+  type MentionMenuHit,
+} from './MentionMenu'
 import { getTextareaCaretRect } from '../lib/textareaCaret'
 
 type Props = {
@@ -71,6 +77,10 @@ export function TagField({
     () => new Set(tags.map((t) => `${t.kind}:${t.entity_id}`)),
     [tags],
   )
+  const menuHits = useMemo(
+    () => orderMentionHits(mentionHits, taggedIds),
+    [mentionHits, taggedIds],
+  )
 
   const syncMentionAnchor = useCallback((offset?: number) => {
     const ta = taRef.current
@@ -128,6 +138,7 @@ export function TagField({
     (hit: MentionMenuHit, multi = false) => {
       const ta = taRef.current
       if (!ta || !mentionRange) return
+      if (isMentionTagged(hit, taggedIds)) return
       const before = note.slice(0, mentionRange.start)
       const after = note.slice(mentionRange.end)
       const insert = multi ? `@${hit.entity_name} @` : `@${hit.entity_name} `
@@ -161,7 +172,15 @@ export function TagField({
         }
       })
     },
-    [mentionRange, note, tags, onChange, runMentionSearch, syncMentionAnchor],
+    [
+      mentionRange,
+      note,
+      tags,
+      taggedIds,
+      onChange,
+      runMentionSearch,
+      syncMentionAnchor,
+    ],
   )
 
   function onTextChange(value: string) {
@@ -185,21 +204,25 @@ export function TagField({
     if (!mentionOpen) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx((i) => (i + 1) % mentionHits.length)
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, 1, taggedIds),
+        )
       }
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
-      if (mentionHits.length > 0) {
-        setMentionIdx((i) => (i - 1 + mentionHits.length) % mentionHits.length)
+      if (menuHits.length > 0) {
+        setMentionIdx((i) =>
+          stepSelectableMentionIdx(menuHits, i, -1, taggedIds),
+        )
       }
       return
     }
-    if ((e.key === 'Enter' || e.key === 'Tab') && mentionHits.length > 0) {
+    if ((e.key === 'Enter' || e.key === 'Tab') && menuHits.length > 0) {
       e.preventDefault()
-      applyMention(mentionHits[mentionIdx]!, e.ctrlKey || e.metaKey)
+      applyMention(menuHits[mentionIdx]!, e.ctrlKey || e.metaKey)
     }
     if (e.key === 'Escape') {
       e.preventDefault()
@@ -233,7 +256,7 @@ export function TagField({
       />
       <MentionMenu
         open={mentionOpen}
-        hits={mentionHits}
+        hits={menuHits}
         activeIdx={mentionIdx}
         busy={mentionBusy}
         anchor={mentionAnchor}

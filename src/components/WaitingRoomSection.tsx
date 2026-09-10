@@ -7,6 +7,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { api } from '../services/api'
+import { orderTaggedLast, stepSelectableIdx } from './MentionMenu'
 
 type WaitingType = 'person' | 'project' | 'geografia'
 type DestType = WaitingType | 'agrupacion' | 'dominio'
@@ -110,6 +111,11 @@ function WaitingLinkPicker({
     () => new Set(selected.map(targetKey)),
     [selected],
   )
+  const menuHits = useMemo(
+    () =>
+      orderTaggedLast(hits, (h) => selectedKeys.has(targetKey(h))),
+    [hits, selectedKeys],
+  )
 
   useEffect(() => {
     return () => {
@@ -169,12 +175,7 @@ function WaitingLinkPicker({
   }, [])
 
   function addTarget(t: LinkTarget) {
-    if (selectedKeys.has(targetKey(t))) {
-      setQuery('')
-      setHits([])
-      setOpen(false)
-      return
-    }
+    if (selectedKeys.has(targetKey(t))) return
     onChange([...selected, t])
     setQuery('')
     setHits([])
@@ -188,19 +189,27 @@ function WaitingLinkPicker({
   }
 
   function onKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'ArrowDown' && open && hits.length) {
+    if (e.key === 'ArrowDown' && open && menuHits.length) {
       e.preventDefault()
-      setActiveIdx((i) => (i + 1) % hits.length)
+      setActiveIdx((i) =>
+        stepSelectableIdx(menuHits, i, 1, (h) =>
+          selectedKeys.has(targetKey(h)),
+        ),
+      )
       return
     }
-    if (e.key === 'ArrowUp' && open && hits.length) {
+    if (e.key === 'ArrowUp' && open && menuHits.length) {
       e.preventDefault()
-      setActiveIdx((i) => (i - 1 + hits.length) % hits.length)
+      setActiveIdx((i) =>
+        stepSelectableIdx(menuHits, i, -1, (h) =>
+          selectedKeys.has(targetKey(h)),
+        ),
+      )
       return
     }
-    if (e.key === 'Enter' && open && hits[activeIdx]) {
+    if (e.key === 'Enter' && open && menuHits[activeIdx]) {
       e.preventDefault()
-      addTarget(hits[activeIdx]!)
+      addTarget(menuHits[activeIdx]!)
       return
     }
     if (e.key === 'Backspace' && !query && selected.length) {
@@ -249,7 +258,7 @@ function WaitingLinkPicker({
           {!busy && hits.length === 0 && query.trim() && (
             <li className="muted waiting-link-empty">Sin coincidencias</li>
           )}
-          {hits.map((hit, i) => {
+          {menuHits.map((hit, i) => {
             const key = targetKey(hit)
             const already = selectedKeys.has(key)
             return (
@@ -257,20 +266,22 @@ function WaitingLinkPicker({
                 <button
                   type="button"
                   role="option"
-                  aria-selected={i === activeIdx}
+                  aria-selected={i === activeIdx && !already}
                   disabled={disabled || already}
                   className={[
                     'waiting-link-result',
                     `kind-${hit.to_type}`,
-                    i === activeIdx ? 'is-active' : '',
+                    i === activeIdx && !already ? 'is-active' : '',
                     already ? 'is-tagged' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                  onMouseEnter={() => setActiveIdx(i)}
+                  onMouseEnter={() => {
+                    if (!already) setActiveIdx(i)
+                  }}
                   onMouseDown={(e) => {
-                    // Evita blur del input antes del click
                     e.preventDefault()
+                    if (already) return
                     addTarget(hit)
                   }}
                 >
@@ -279,9 +290,9 @@ function WaitingLinkPicker({
                   </span>
                   <span className="waiting-link-result-name">
                     {hit.name}
-                    {already ? ' · ya' : ''}
+                    {already ? ' · ya marcado' : ''}
                   </span>
-                  {hit.subtitle && (
+                  {hit.subtitle && !already && (
                     <span className="waiting-link-result-sub muted">
                       {hit.subtitle}
                     </span>

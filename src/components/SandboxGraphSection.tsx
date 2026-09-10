@@ -275,10 +275,7 @@ export function SandboxGraphSection({
       return
     }
     try {
-      let res = await api.searchGraphNodes(q, 10, { mode: 'lexical' })
-      if (res.results.length === 0) {
-        res = await api.searchGraphNodes(q, 10, { mode: 'semantic' })
-      }
+      const res = await api.searchGraphNodes(q, 10, { mode: 'hybrid' })
       setImportHits(
         res.results.filter((r) =>
           ['person', 'project', 'quantomo'].includes(r.type),

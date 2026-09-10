@@ -14,6 +14,7 @@ import {
   ingestFileKey,
 } from '../services/ingestBatch.js'
 import { resolveContained, VAULT_DIR } from '../services/paths.js'
+import { kickPipeline } from '../services/pipeline.js'
 
 const VAULT_ROOT = VAULT_DIR
 const INCOMING = path.join(VAULT_ROOT, '_incoming')
@@ -280,6 +281,10 @@ ingestRouter.post('/audio', (req, res) => {
           `[ingest] lote ${batchId.slice(0, 8)}: +${created.length} nuevo(s)` +
             (reused.length > 0 ? `, ${reused.length} ya existía(n)` : ''),
         )
+        const kickIds = created
+          .filter((e) => e.status === 'queued')
+          .map((e) => e.id)
+        if (kickIds.length > 0) kickPipeline(kickIds)
       }
       if (errors.length > 0) {
         res.status(207).json({
