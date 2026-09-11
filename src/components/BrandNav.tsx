@@ -4,6 +4,7 @@ import { useLiveSession } from '../live/LiveSessionContext'
 
 export type AppView =
   | 'dashboard'
+  | 'tareas'
   | 'franca'
   | 'directo'
   | 'aduana'
@@ -41,6 +42,7 @@ const GROUPS: Group[] = [
     label: 'Inicio',
     items: [
       { kind: 'view', id: 'dashboard', label: 'Dashboard', stayHome: true },
+      { kind: 'view', id: 'tareas', label: 'Tareas', stayHome: true },
       { kind: 'view', id: 'dialogo', label: 'Diálogo', stayHome: true },
       { kind: 'view', id: 'sentinela', label: 'Sentinela', stayHome: true },
     ],

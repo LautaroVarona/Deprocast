@@ -1133,6 +1133,8 @@ function migrate(database: DatabaseSync): void {
   backfillEntityAliases(database)
   backfillProjectAliases(database)
   ensureKnowledgeTables(database)
+  ensureSuggestedTodoTables(database)
+  ensureCalendarChronosTables(database)
   ensureSearchFts(database)
   backfillCurrentRun(database)
   seedAppSettings(database)
@@ -1245,6 +1247,74 @@ function backfillValidatedFileMetadata(database: DatabaseSync): void {
       now,
     )
   }
+}
+
+function ensureSuggestedTodoTables(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS suggested_todos (
+      id TEXT PRIMARY KEY,
+      fingerprint TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      why TEXT NOT NULL,
+      horizon TEXT NOT NULL,
+      estimate_minutes INTEGER,
+      suggested_window TEXT,
+      priority INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'suggested',
+      relations_json TEXT NOT NULL DEFAULT '{}',
+      source_json TEXT NOT NULL DEFAULT '{}',
+      acceptance_json TEXT,
+      hold_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_suggested_todos_status
+      ON suggested_todos(status);
+    CREATE INDEX IF NOT EXISTS idx_suggested_todos_horizon
+      ON suggested_todos(horizon, status);
+    CREATE INDEX IF NOT EXISTS idx_suggested_todos_hold
+      ON suggested_todos(hold_at);
+  `)
+  ensureColumn(database, 'suggested_todos', 'parent_id', 'TEXT')
+  ensureColumn(database, 'suggested_todos', 'coagulation', `TEXT NOT NULL DEFAULT 'suggestion'`)
+  ensureColumn(database, 'suggested_todos', 'gravity', 'INTEGER')
+  ensureColumn(database, 'suggested_todos', 'area', 'TEXT')
+  ensureColumn(database, 'suggested_todos', 'intention_at', 'TEXT')
+  ensureColumn(database, 'suggested_todos', 'collapsed_at', 'TEXT')
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_suggested_todos_parent
+      ON suggested_todos(parent_id);
+  `)
+}
+
+function ensureCalendarChronosTables(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS calendar_week_matrix (
+      week_monday TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      cell INTEGER NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (week_monday, task_id)
+    );
+    CREATE TABLE IF NOT EXISTS calendar_day_energy (
+      day_key TEXT PRIMARY KEY,
+      cuerpo INTEGER NOT NULL DEFAULT 8,
+      mente INTEGER NOT NULL DEFAULT 8,
+      alma INTEGER NOT NULL DEFAULT 8,
+      source TEXT NOT NULL DEFAULT 'manual',
+      split_mode TEXT NOT NULL DEFAULT '3',
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS calendar_simulations (
+      id TEXT PRIMARY KEY,
+      typology TEXT NOT NULL,
+      week_monday TEXT NOT NULL,
+      plan_json TEXT NOT NULL,
+      friction REAL,
+      created_at TEXT NOT NULL,
+      UNIQUE (typology, week_monday)
+    );
+  `)
 }
 
 function ensureKnowledgeTables(database: DatabaseSync): void {

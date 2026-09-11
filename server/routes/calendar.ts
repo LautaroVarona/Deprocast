@@ -7,6 +7,16 @@ import type {
   Entry,
   PendingTask,
 } from '../types.js'
+import {
+  getDayEnergy,
+  getWeekMatrix,
+  listWeekSimulations,
+  placeMatrixCell,
+  putDayEnergy,
+  putWeekMatrix,
+  runWeekSimulations,
+} from '../services/calendarChronos.js'
+import { listSuggestedTodos } from '../services/suggestedTodos.js'
 
 export const calendarRouter = Router()
 
@@ -302,4 +312,95 @@ calendarRouter.patch('/tasks/:taskId', (req, res) => {
   )
 
   res.json({ ok: true, task })
+})
+
+function asWeekKey(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const t = raw.trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : null
+}
+
+calendarRouter.get('/matrix', (req, res) => {
+  const week = asWeekKey(req.query.week)
+  if (!week) {
+    res.status(400).json({ error: 'week YYYY-MM-DD requerido' })
+    return
+  }
+  res.json({ ok: true, ...getWeekMatrix(week) })
+})
+
+calendarRouter.put('/matrix', (req, res) => {
+  const body = (req.body ?? {}) as {
+    week?: unknown
+    map?: unknown
+    task_id?: unknown
+    cell?: unknown
+  }
+  const week = asWeekKey(body.week)
+  if (!week) {
+    res.status(400).json({ error: 'week YYYY-MM-DD requerido' })
+    return
+  }
+  if (typeof body.task_id === 'string' && typeof body.cell === 'number') {
+    res.json({ ok: true, ...placeMatrixCell(week, body.task_id, body.cell) })
+    return
+  }
+  const map =
+    body.map && typeof body.map === 'object' && !Array.isArray(body.map)
+      ? (body.map as Record<string, number>)
+      : {}
+  res.json({ ok: true, ...putWeekMatrix(week, map) })
+})
+
+calendarRouter.get('/energy', (req, res) => {
+  const day = asWeekKey(req.query.day)
+  if (!day) {
+    res.status(400).json({ error: 'day YYYY-MM-DD requerido' })
+    return
+  }
+  res.json({ ok: true, energy: getDayEnergy(day) })
+})
+
+calendarRouter.put('/energy', (req, res) => {
+  const body = (req.body ?? {}) as {
+    day?: unknown
+    cuerpo?: unknown
+    mente?: unknown
+    alma?: unknown
+    source?: unknown
+    split_mode?: unknown
+  }
+  const day = asWeekKey(body.day)
+  if (!day) {
+    res.status(400).json({ error: 'day YYYY-MM-DD requerido' })
+    return
+  }
+  const energy = putDayEnergy(day, {
+    cuerpo: typeof body.cuerpo === 'number' ? body.cuerpo : undefined,
+    mente: typeof body.mente === 'number' ? body.mente : undefined,
+    alma: typeof body.alma === 'number' ? body.alma : undefined,
+    source: typeof body.source === 'string' ? body.source : undefined,
+    split_mode: body.split_mode === '2' || body.split_mode === '3'
+      ? body.split_mode
+      : undefined,
+  })
+  res.json({ ok: true, energy })
+})
+
+calendarRouter.get('/simulations', (req, res) => {
+  const week = asWeekKey(req.query.week)
+  if (!week) {
+    res.status(400).json({ error: 'week YYYY-MM-DD requerido' })
+    return
+  }
+  const refresh = req.query.refresh === '1' || req.query.refresh === 'true'
+  if (refresh || listWeekSimulations(week).length === 0) {
+    const uncollapsed = listSuggestedTodos().filter(
+      (t) => t.intention_at && !t.collapsed_at,
+    ).length
+    const simulations = runWeekSimulations(week, { uncollapsed })
+    res.json({ ok: true, simulations })
+    return
+  }
+  res.json({ ok: true, simulations: listWeekSimulations(week) })
 })

@@ -7,6 +7,7 @@ import type {
   MapOverview,
 } from '../../types'
 import { PATERNA_VIEW, type MapCamera } from '../../lib/map/zones'
+import { CAL_FOCUS_EVENT, CAL_FOCUS_LS } from '../../lib/calendar/engine'
 import { MapaCanvas, type MapPick } from './MapaCanvas'
 import { MapaLayerPanel } from './MapaLayerPanel'
 import { MapaOccupancy } from './MapaOccupancy'
@@ -49,9 +50,13 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
         ? pick.place
         : null
 
-  const load = useCallback(async (id?: string) => {
+  const [chronosDay, setChronosDay] = useState<string | null>(
+    () => localStorage.getItem(CAL_FOCUS_LS),
+  )
+
+  const load = useCallback(async (id?: string, day?: string | null) => {
     try {
-      const next = await api.mapOverview(id)
+      const next = await api.mapOverview(id, day || undefined)
       setData(next)
       setSystemId(next.system.id)
       localStorage.setItem(SYSTEM_KEY, next.system.id)
@@ -64,12 +69,22 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
   }, [])
 
   useEffect(() => {
-    void load(systemId)
-  }, [load, refreshKey])
+    void load(systemId, chronosDay)
+  }, [load, refreshKey, chronosDay, systemId])
+
+  useEffect(() => {
+    function onFocus(ev: Event) {
+      const detail = (ev as CustomEvent<string>).detail
+      const day = typeof detail === 'string' ? detail : localStorage.getItem(CAL_FOCUS_LS)
+      setChronosDay(day)
+    }
+    window.addEventListener(CAL_FOCUS_EVENT, onFocus)
+    return () => window.removeEventListener(CAL_FOCUS_EVENT, onFocus)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
-    void load(systemId).then((next) => {
+    void load(systemId, chronosDay).then((next) => {
       if (!next || cancelled) return
       const cam = cameraFromOverview(next)
       setCamera(cam)
@@ -84,7 +99,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
     return () => {
       cancelled = true
     }
-  }, [load, systemId])
+  }, [load, systemId, chronosDay])
 
   useEffect(() => {
     if (!selectedPlace) {
@@ -151,7 +166,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
     setBusy(true)
     try {
       await api.mapPatchLayer(id, { visible, opacity })
-      await load(systemId)
+      await load(systemId, chronosDay)
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo actualizar la capa')
@@ -206,7 +221,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
       await api.mapOccupy({ place_id: selectedPlace.id, kind, id })
       const occ = await api.mapOccupancy(selectedPlace.id)
       setOccupancy(occ.items)
-      await load(systemId)
+      await load(systemId, chronosDay)
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo anclar')
@@ -234,7 +249,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
       })
       const occ = await api.mapOccupancy(selectedPlace.id)
       setOccupancy(occ.items)
-      await load(systemId)
+      await load(systemId, chronosDay)
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo quitar')
@@ -254,7 +269,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
         label,
         notes,
       })
-      await load(systemId)
+      await load(systemId, chronosDay)
       setPick({ type: 'tag', tag: created.tag })
       onChanged?.()
     } catch (err) {
@@ -269,7 +284,7 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
     try {
       await api.mapDeleteTag(id)
       setPick(null)
-      await load(systemId)
+      await load(systemId, chronosDay)
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo borrar el tag')
@@ -290,6 +305,11 @@ export function MapaSection({ refreshKey, onChanged, onOpenAtlas }: Props) {
             {moon?.label ?? 'Luna'}
             {moon ? ` · ${Math.round(moon.illumination * 100)}%` : ''}
           </span>
+          {chronosDay ? (
+            <span className="mapa-moon" title="Foco Chronos">
+              Chronos · {chronosDay}
+            </span>
+          ) : null}
           <span className="mapa-bodies">Sol · Luna · Mercurio</span>
           <button type="button" className="btn btn-tiny" onClick={flyHome}>
             Home

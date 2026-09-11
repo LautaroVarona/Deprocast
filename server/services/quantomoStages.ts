@@ -97,6 +97,42 @@ export function listQuantomosByStage(
   )
 }
 
+export function getQuantomoById(quantomoId: string): QuantomoStageRow | null {
+  const db = getDb()
+  return (
+    row<QuantomoStageRow>(
+      db.prepare(`${STAGE_SELECT} WHERE q.id = ?`).get(quantomoId),
+    ) ?? null
+  )
+}
+
+export function countQuantomosByStage(
+  stage: QuantomoStage | 'premium',
+): number {
+  const db = getDb()
+  if (stage === 'premium') {
+    const n = row<{ c: number }>(
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c
+           FROM quantomos q
+           JOIN quantomo_lattices l ON l.quantomo_id = q.id
+           WHERE coalesce(q.stage, 'proto') = 'sealed' AND l.premium = 1`,
+        )
+        .get(),
+    )
+    return Number(n?.c ?? 0)
+  }
+  const n = row<{ c: number }>(
+    db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM quantomos WHERE coalesce(stage, 'proto') = ?`,
+      )
+      .get(stage),
+  )
+  return Number(n?.c ?? 0)
+}
+
 export function chestSnapshot(): {
   open_threads: Array<{
     id: string
@@ -105,8 +141,8 @@ export function chestSnapshot(): {
     status: string
     hermetic_weight: number | null
   }>
-  proto: QuantomoStageRow[]
-  pre: QuantomoStageRow[]
+  proto: number
+  pre: number
   sealed: number
   premium: number
 } {
@@ -132,10 +168,10 @@ export function chestSnapshot(): {
   )
   return {
     open_threads,
-    proto: listQuantomosByStage('proto'),
-    pre: listQuantomosByStage('pre'),
-    sealed: listQuantomosByStage('sealed').length,
-    premium: listQuantomosByStage('premium').length,
+    proto: countQuantomosByStage('proto'),
+    pre: countQuantomosByStage('pre'),
+    sealed: countQuantomosByStage('sealed'),
+    premium: countQuantomosByStage('premium'),
   }
 }
 
@@ -225,12 +261,106 @@ export function promoteToPre(
   ).run(universe, JSON.stringify(profile), JSON.stringify(calendar), quantomoId)
 
   createEntityProposalsFromEntry(db, q.entry_id)
-  const out = listQuantomosByStage('pre').find((x) => x.id === quantomoId)
+  const out = getQuantomoById(quantomoId)
   if (!out) throw new Error('No se pudo leer el prequántomo')
   return out
 }
 
-export function sealQuantomo(quantomoId: string): QuantomoStageRow {
+export type QuantomoBatchResult = {
+  promoted?: number
+  sealed: number
+  skipped: number
+  missing: number
+  errors: Array<{ id: string; error: string }>
+}
+
+const APPLY_SEAL_CAP = 5000
+
+export function promoteQuantomosToPre(
+  ids: string[],
+  patch?: {
+    universe?: string | null
+    profile?: Record<string, unknown>
+    calendar?: Record<string, unknown>
+  },
+): Omit<QuantomoBatchResult, 'sealed'> & { promoted: number; sealed: 0 } {
+  const unique = [...new Set(ids.map((s) => s.trim()).filter(Boolean))].slice(
+    0,
+    APPLY_SEAL_CAP,
+  )
+  let promoted = 0
+  let skipped = 0
+  let missing = 0
+  const errors: Array<{ id: string; error: string }> = []
+  for (const id of unique) {
+    const q = getQuantomoById(id)
+    if (!q) {
+      missing += 1
+      continue
+    }
+    const stage = q.stage ?? 'proto'
+    if (stage === 'sealed' || stage === 'pre') {
+      skipped += 1
+      continue
+    }
+    try {
+      promoteToPre(id, patch)
+      promoted += 1
+    } catch (err) {
+      errors.push({
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  return { promoted, sealed: 0, skipped, missing, errors }
+}
+
+export function applyQuantomoSeals(ids: string[]): QuantomoBatchResult {
+  const unique = [...new Set(ids.map((s) => s.trim()).filter(Boolean))].slice(
+    0,
+    APPLY_SEAL_CAP,
+  )
+  let sealed = 0
+  let skipped = 0
+  let missing = 0
+  const errors: Array<{ id: string; error: string }> = []
+  const entryIds = new Set<string>()
+  for (const id of unique) {
+    const q = getQuantomoById(id)
+    if (!q) {
+      missing += 1
+      continue
+    }
+    const stage = q.stage ?? 'proto'
+    if (stage === 'sealed' && q.recognized === 1) {
+      skipped += 1
+      continue
+    }
+    try {
+      if (stage === 'proto') {
+        promoteToPre(id, { profile: { voto_externo: true } })
+      }
+      sealQuantomo(id, { skipEmbed: true })
+      sealed += 1
+      if (q.entry_id) entryIds.add(q.entry_id)
+    } catch (err) {
+      errors.push({
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  for (const entryId of entryIds) {
+    enqueueEmbed(() => embedApprovedEntry(entryId))
+  }
+  return { sealed, skipped, missing, errors }
+}
+
+export function sealQuantomo(
+  quantomoId: string,
+  opts?: { skipEmbed?: boolean },
+): QuantomoStageRow {
   const db = getDb()
   const q = row<{
     id: string
@@ -331,7 +461,9 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
     throw err
   }
 
-  enqueueEmbed(() => embedApprovedEntry(q.entry_id))
+  if (!opts?.skipEmbed) {
+    enqueueEmbed(() => embedApprovedEntry(q.entry_id))
+  }
 
   // Rellenar entity_links sin quantomo (menciones/NER previos al átomo)
   db.prepare(
@@ -339,7 +471,7 @@ export function sealQuantomo(quantomoId: string): QuantomoStageRow {
      WHERE entry_id = ? AND (quantomo_id IS NULL OR quantomo_id = '')`,
   ).run(q.id, q.entry_id)
 
-  const out = listQuantomosByStage('sealed').find((x) => x.id === q.id)
+  const out = getQuantomoById(q.id)
   if (!out) throw new Error('No se pudo leer el quántomo sellado')
   return out
 }
@@ -352,7 +484,7 @@ export function getLatticeView(quantomoId: string): {
   seal_ok: boolean
 } {
   const db = getDb()
-  const q = listQuantomosByStage('all').find((x) => x.id === quantomoId)
+  const q = getQuantomoById(quantomoId)
   if (!q) throw new Error('Quántomo no encontrado')
   const lat = row<{
     cells: Buffer

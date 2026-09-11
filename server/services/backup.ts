@@ -97,6 +97,10 @@ export const BACKUP_TABLES = [
   'knowledge_legal',
   'knowledge_books',
   'knowledge_anchors',
+  'suggested_todos',
+  'calendar_week_matrix',
+  'calendar_day_energy',
+  'calendar_simulations',
 ] as const
 
 export type BackupTableName = (typeof BACKUP_TABLES)[number]
@@ -144,6 +148,10 @@ export const USER_ACTIVITY_TABLES = [
   'knowledge_legal',
   'knowledge_books',
   'knowledge_anchors',
+  'suggested_todos',
+  'calendar_week_matrix',
+  'calendar_day_energy',
+  'calendar_simulations',
 ] as const
 
 export type BackupRunMeta = {
@@ -382,7 +390,11 @@ export function backupSummary(run: BackupRunMeta | null = null): BackupSummary {
         n('knowledge_papers') +
         n('knowledge_legal') +
         n('knowledge_books') +
-        n('knowledge_anchors'),
+        n('knowledge_anchors') +
+        n('suggested_todos') +
+        n('calendar_week_matrix') +
+        n('calendar_day_energy') +
+        n('calendar_simulations'),
     },
   }
 }

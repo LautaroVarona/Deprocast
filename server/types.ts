@@ -1199,3 +1199,103 @@ export interface KnowledgeNeighbor {
   label: string
   score: number
 }
+
+export type SuggestedHorizon = 'hoy' | 'esta_semana' | 'proxima_semana' | 'cola'
+export type SuggestedTodoStatus = 'suggested' | 'accepted' | 'dismissed' | 'done'
+export type SuggestedTodoPriority = 1 | 2 | 3 | 4
+export type SuggestedTodoSourceKind =
+  | 'curriculum'
+  | 'knowledge'
+  | 'project'
+  | 'person_waiting'
+  | 'calendar_gap'
+  | 'heuristic'
+  | 'mixed'
+  | 'ludus_microtask'
+
+export type SuggestedTodoCoagulation = 'immutable' | 'routine' | 'suggestion'
+export type CalendarDaySplitMode = '2' | '3'
+export type CalendarTypology =
+  | 'vectorizador'
+  | 'clasificador'
+  | 'crawler'
+  | 'generativo'
+  | 'ejecutivo'
+  | 'omnivoro'
+
+export interface SuggestedTodoWindow {
+  dow?: number[]
+  time_local?: string
+}
+
+export interface SuggestedTodoEntityRef {
+  kind: string
+  id: string
+  label: string
+}
+
+export interface SuggestedTodoRelations {
+  project_ids: string[]
+  person_ids: string[]
+  knowledge_ids: string[]
+  domain_ids: string[]
+  entity_refs?: SuggestedTodoEntityRef[]
+}
+
+export interface SuggestedTodoSource {
+  kind: SuggestedTodoSourceKind
+  refs: string[]
+  rule?: string
+}
+
+export interface SuggestedTodoAcceptance {
+  create_calendar_hold?: boolean
+  export_todoist_shape?: boolean
+}
+
+export interface SuggestedTodo {
+  id: string
+  title: string
+  why: string
+  horizon: SuggestedHorizon
+  estimate_minutes?: number
+  suggested_window?: SuggestedTodoWindow
+  priority: SuggestedTodoPriority
+  status: SuggestedTodoStatus
+  relations: SuggestedTodoRelations
+  source: SuggestedTodoSource
+  acceptance?: SuggestedTodoAcceptance
+  fingerprint: string
+  hold_at: string | null
+  parent_id: string | null
+  coagulation: SuggestedTodoCoagulation
+  gravity: number | null
+  area: string | null
+  intention_at: string | null
+  collapsed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CalendarWeekMatrix {
+  week: string
+  map: Record<string, number>
+}
+
+export interface CalendarDayEnergy {
+  day: string
+  cuerpo: number
+  mente: number
+  alma: number
+  source: string
+  split_mode: CalendarDaySplitMode
+}
+
+export interface CalendarSimulation {
+  id: string
+  typology: CalendarTypology
+  week_monday: string
+  plan: Record<string, number>
+  friction: number
+  created_at: string
+}

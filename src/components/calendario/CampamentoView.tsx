@@ -1,5 +1,12 @@
 import { useMemo, useState } from 'react'
-import type { CalendarOccurrence, CalendarTask, DeproAgentStatus, DeproTypology } from '../../types'
+import type {
+  CalendarOccurrence,
+  CalendarSimulation,
+  CalendarTask,
+  DeproAgentStatus,
+  DeproTypology,
+  SuggestedTodo,
+} from '../../types'
 import {
   addDays,
   amazonaCoords,
@@ -28,8 +35,17 @@ type Props = {
   trident: TridentId
   onMatrixMap: (next: Record<string, number>) => void
   onToggleTask: (task: CalendarTask) => void
+  todoHolds?: SuggestedTodo[]
+  onToggleTodoHold?: (todo: SuggestedTodo) => void
   onTrident: (id: TridentId) => void
   onSelectDay: (date: Date) => void
+  deckTodos?: SuggestedTodo[]
+  hideHighGravity?: boolean
+  simulations?: CalendarSimulation[]
+  onPlaceDeck?: (todo: SuggestedTodo, cell: number) => void
+  onSkipRoutine?: (todo: SuggestedTodo) => void
+  onRegenerateDeck?: () => void
+  deckBusy?: boolean
 }
 
 const MATRIX_COLS = WEEKDAY_ALCHEMY.slice(0, 6)
@@ -60,8 +76,17 @@ export function CampamentoView({
   trident,
   onMatrixMap,
   onToggleTask,
+  todoHolds = [],
+  onToggleTodoHold,
   onTrident,
   onSelectDay,
+  deckTodos = [],
+  hideHighGravity = false,
+  simulations = [],
+  onPlaceDeck,
+  onSkipRoutine,
+  onRegenerateDeck,
+  deckBusy = false,
 }: Props) {
   const [index, setIndex] = useState(0)
   const days = useMemo(
@@ -95,12 +120,126 @@ export function CampamentoView({
     return matrixMap[task.id] ?? defaultMatrixCell(task.id, task.tag, task.source_type)
   }
 
-  function onDropCell(cell: number, taskId: string) {
+  function onDropCell(cell: number, taskId: string, kind: string) {
+    if (kind === 'deck' && onPlaceDeck) {
+      const card = deckTodos.find((t) => t.id === taskId)
+      if (card) onPlaceDeck(card, cell)
+      return
+    }
     onMatrixMap({ ...matrixMap, [taskId]: cell })
   }
 
+  const [area, setArea] = useState<string>('all')
+  const [dropCell, setDropCell] = useState<number | null>(null)
+  const frictionByTypology = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const s of simulations) map.set(s.typology, s.friction)
+    return map
+  }, [simulations])
+
+  const parentIds = useMemo(
+    () => new Set(deckTodos.filter((t) => t.parent_id).map((t) => t.parent_id as string)),
+    [deckTodos],
+  )
+  const deckCards = useMemo(() => {
+    const areas = new Set<string>()
+    const cards = deckTodos.filter((t) => {
+      if (t.status !== 'suggested') return false
+      if (t.horizon !== 'hoy' && t.horizon !== 'esta_semana') return false
+      if (parentIds.has(t.id)) return false
+      if (hideHighGravity && (t.gravity ?? 0) >= 10) return false
+      if (area !== 'all' && t.area !== area) return false
+      if (t.area) areas.add(t.area)
+      return true
+    })
+    return { cards, areas: [...areas].sort() }
+  }, [deckTodos, parentIds, hideHighGravity, area])
+
   return (
     <div className="cal-campamento">
+      <aside className="cal-mission-deck">
+        <header className="cal-rail-head">
+          <div>
+            <p className="cal-ingest-label mono">Mazo de misiones</p>
+            <h3>Partículas</h3>
+          </div>
+        </header>
+        <div className="cal-deck-filters">
+          <button
+            type="button"
+            className={area === 'all' ? 'filter-chip is-active' : 'filter-chip'}
+            onClick={() => setArea('all')}
+          >
+            Todas
+          </button>
+          {deckCards.areas.map((a) => (
+            <button
+              key={a}
+              type="button"
+              className={area === a ? 'filter-chip is-active' : 'filter-chip'}
+              onClick={() => setArea(a)}
+            >
+              {a}
+            </button>
+          ))}
+        </div>
+        {onRegenerateDeck && (
+          <button
+            type="button"
+            className="btn btn-tiny"
+            disabled={deckBusy}
+            onClick={() => onRegenerateDeck()}
+          >
+            Regenerar
+          </button>
+        )}
+        {deckCards.cards.length === 0 && (
+          <p className="muted empty">
+            Capturá curricula en Conocimiento o activá proyectos.
+          </p>
+        )}
+        <ul className="cal-deck-list">
+          {deckCards.cards.map((card) => {
+            const locked = card.coagulation === 'immutable'
+            return (
+              <li key={card.id}>
+                <button
+                  type="button"
+                  draggable={!locked}
+                  className={`cal-mission-card is-${card.coagulation}${locked ? ' is-locked' : ''}`}
+                  title={card.why}
+                  onDragStart={(e) => {
+                    if (locked) {
+                      e.preventDefault()
+                      return
+                    }
+                    e.dataTransfer.setData('text/task-id', card.id)
+                    e.dataTransfer.setData('text/kind', 'deck')
+                    e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                >
+                  <span className="mono cal-mission-meta">
+                    {card.estimate_minutes ?? '—'} min · g{card.gravity ?? '—'} · {card.coagulation}
+                  </span>
+                  <span className="cal-mission-title">{card.title}</span>
+                  {card.coagulation === 'routine' && onSkipRoutine && (
+                    <span
+                      className="cal-mission-skip"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onSkipRoutine(card)
+                      }}
+                    >
+                      Saltar
+                    </span>
+                  )}
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+      </aside>
+
       <div className="cal-campamento-main">
         <div className="cal-week-select" role="tablist" aria-label="Día de la semana">
           {days.map((date, i) => {
@@ -149,18 +288,27 @@ export function CampamentoView({
                 <div
                   key={cell}
                   className={
-                    lit
-                      ? `cal-matrix-cell is-lit is-${col.stageKey}`
-                      : `cal-matrix-cell is-${col.stageKey}`
+                    [
+                      'cal-matrix-cell',
+                      lit ? 'is-lit' : '',
+                      `is-${col.stageKey}`,
+                      dropCell === cell ? 'is-drop' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
                   }
                   onDragOver={(e) => {
                     e.preventDefault()
-                    e.dataTransfer.dropEffect = 'move'
+                    e.dataTransfer.dropEffect = 'copy'
+                    setDropCell(cell)
                   }}
+                  onDragLeave={() => setDropCell((c) => (c === cell ? null : c))}
                   onDrop={(e) => {
                     e.preventDefault()
+                    setDropCell(null)
                     const id = e.dataTransfer.getData('text/task-id')
-                    if (id) onDropCell(cell, id)
+                    const kind = e.dataTransfer.getData('text/kind') || 'task'
+                    if (id) onDropCell(cell, id, kind)
                   }}
                 >
                   {items.map((t) => (
@@ -222,6 +370,28 @@ export function CampamentoView({
             </li>
           ))}
         </ul>
+        {todoHolds.filter((t) => t.hold_at && t.status !== 'dismissed').length > 0 && (
+          <ul className="cal-week-queue">
+            {todoHolds
+              .filter((t) => t.hold_at && t.status !== 'dismissed')
+              .map((t) => (
+                <li key={`hold:${t.id}`}>
+                  <button
+                    type="button"
+                    className={
+                      t.status === 'done'
+                        ? 'cal-queue-item is-done'
+                        : 'cal-queue-item is-todo-hold'
+                    }
+                    onClick={() => onToggleTodoHold?.(t)}
+                  >
+                    <span className="cal-task-cell mono">hold</span>
+                    <span className="cal-queue-text">{t.title}</span>
+                  </button>
+                </li>
+              ))}
+          </ul>
+        )}
       </div>
 
       <aside className="cal-campamento-rail">
@@ -284,6 +454,9 @@ export function CampamentoView({
               <span className="mono muted">
                 {t.status}
                 {t.vivo ? ` · ${t.vivo}` : ''}
+                {frictionByTypology.has(t.id)
+                  ? ` · Δ${frictionByTypology.get(t.id)?.toFixed(1)}`
+                  : ''}
               </span>
             </li>
           ))}

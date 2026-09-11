@@ -95,6 +95,10 @@ import type {
   KnowledgeNeighbor,
   KnowledgeAnchor,
   KnowledgeAnchorRole,
+  SuggestedTodo,
+  SuggestedTodoAcceptance,
+  CalendarDayEnergy,
+  CalendarSimulation,
 } from '../types'
 import { request } from './http'
 
@@ -250,6 +254,120 @@ export const api = {
       `/api/calendar/tasks/${encodeURIComponent(taskId)}`,
       { method: 'PATCH', body: JSON.stringify({ done }) },
     ),
+
+  getCalendarMatrix: (week: string) => {
+    const qs = new URLSearchParams({ week })
+    return request<{ ok: boolean; week: string; map: Record<string, number> }>(
+      `/api/calendar/matrix?${qs}`,
+    )
+  },
+
+  putCalendarMatrix: (week: string, map: Record<string, number>) =>
+    request<{ ok: boolean; week: string; map: Record<string, number> }>(
+      '/api/calendar/matrix',
+      { method: 'PUT', body: JSON.stringify({ week, map }) },
+    ),
+
+  placeCalendarMatrixCell: (week: string, taskId: string, cell: number) =>
+    request<{ ok: boolean; week: string; map: Record<string, number> }>(
+      '/api/calendar/matrix',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ week, task_id: taskId, cell }),
+      },
+    ),
+
+  getCalendarEnergy: (day: string) =>
+    request<{ ok: boolean; energy: CalendarDayEnergy }>(
+      `/api/calendar/energy?${new URLSearchParams({ day })}`,
+    ),
+
+  putCalendarEnergy: (
+    day: string,
+    patch: Partial<Omit<CalendarDayEnergy, 'day'>>,
+  ) =>
+    request<{ ok: boolean; energy: CalendarDayEnergy }>('/api/calendar/energy', {
+      method: 'PUT',
+      body: JSON.stringify({ day, ...patch }),
+    }),
+
+  getCalendarSimulations: (week: string, refresh = false) => {
+    const qs = new URLSearchParams({ week })
+    if (refresh) qs.set('refresh', '1')
+    return request<{ ok: boolean; simulations: CalendarSimulation[] }>(
+      `/api/calendar/simulations?${qs}`,
+    )
+  },
+
+  dismissSuggestedTodo: (id: string) =>
+    request<{ ok: boolean; todo: SuggestedTodo }>(
+      `/api/todos/${encodeURIComponent(id)}/dismiss`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  doneSuggestedTodo: (id: string) =>
+    request<{ ok: boolean; todo: SuggestedTodo }>(
+      `/api/todos/${encodeURIComponent(id)}/done`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  listSuggestedTodos: (opts?: {
+    status?: string
+    horizon?: string
+    from?: string
+    to?: string
+  }) => {
+    const params = new URLSearchParams()
+    if (opts?.status) params.set('status', opts.status)
+    if (opts?.horizon) params.set('horizon', opts.horizon)
+    if (opts?.from) params.set('from', opts.from)
+    if (opts?.to) params.set('to', opts.to)
+    const qs = params.toString()
+    return request<{ ok: boolean; todos: SuggestedTodo[] }>(
+      `/api/todos${qs ? `?${qs}` : ''}`,
+    )
+  },
+
+  regenerateSuggestedTodos: (useLlm = true) =>
+    request<{
+      ok: boolean
+      todos: SuggestedTodo[]
+      created: number
+      updated: number
+    }>('/api/todos/regenerate', {
+      method: 'POST',
+      body: JSON.stringify({ use_llm: useLlm }),
+    }),
+
+  acceptSuggestedTodo: (
+    id: string,
+    body?: { create_calendar_hold?: boolean; export_todoist_shape?: boolean },
+  ) =>
+    request<{ ok: boolean; todo: SuggestedTodo }>(
+      `/api/todos/${encodeURIComponent(id)}/accept`,
+      { method: 'POST', body: JSON.stringify(body ?? {}) },
+    ),
+
+  patchSuggestedTodo: (
+    id: string,
+    body: { status?: string; acceptance?: SuggestedTodoAcceptance },
+  ) =>
+    request<{ ok: boolean; todo: SuggestedTodo }>(
+      `/api/todos/${encodeURIComponent(id)}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+
+  exportSuggestedTodosTodoist: () =>
+    request<{
+      ok: boolean
+      items: Array<{
+        content: string
+        description: string
+        priority: number
+        due: string | null
+        labels: string[]
+      }>
+    }>('/api/todos/export?shape=todoist'),
 
   runPipeline: (entryIds?: string[]) =>
     request<{
@@ -1175,8 +1293,8 @@ export const api = {
         status: string
         hermetic_weight: number | null
       }>
-      proto: Quantomo[]
-      pre: Quantomo[]
+      proto: number
+      pre: number
       sealed: number
       premium: number
     }>('/api/quantomos/chest'),
@@ -1194,10 +1312,43 @@ export const api = {
       { method: 'POST', body: JSON.stringify(body ?? {}) },
     ),
 
+  promoteQuantomoPreBatch: (
+    ids: string[],
+    body?: {
+      universe?: string | null
+      profile?: Record<string, unknown>
+      calendar?: Record<string, unknown>
+    },
+  ) =>
+    request<{
+      ok: boolean
+      promoted: number
+      skipped: number
+      missing: number
+      errors: Array<{ id: string; error: string }>
+      count: number
+    }>('/api/quantomos/promote-pre-batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids, ...(body ?? {}) }),
+    }),
+
   sealQuantomo: (id: string) =>
     request<{ ok: boolean; quantomo: Quantomo }>(`/api/quantomos/${id}/seal`, {
       method: 'POST',
       body: '{}',
+    }),
+
+  applyQuantomoSeal: (opts: { ids?: string[]; payload?: unknown }) =>
+    request<{
+      ok: boolean
+      sealed: number
+      skipped: number
+      missing: number
+      errors: Array<{ id: string; error: string }>
+      count: number
+    }>('/api/quantomos/apply-seal', {
+      method: 'POST',
+      body: JSON.stringify(opts),
     }),
 
   getQuantomoLattice: (id: string) =>
@@ -2637,11 +2788,12 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  mapOverview: (systemId?: string) => {
-    const qs = systemId
-      ? `?${new URLSearchParams({ system_id: systemId })}`
-      : ''
-    return request<{ ok: boolean } & MapOverview>(`/api/map/overview${qs}`)
+  mapOverview: (systemId?: string, day?: string) => {
+    const qs = new URLSearchParams()
+    if (systemId) qs.set('system_id', systemId)
+    if (day) qs.set('day', day)
+    const suffix = qs.toString() ? `?${qs}` : ''
+    return request<{ ok: boolean } & MapOverview>(`/api/map/overview${suffix}`)
   },
 
   mapCreateSystem: (body: {

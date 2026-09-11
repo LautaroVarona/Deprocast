@@ -88,6 +88,7 @@ export function QuantomosSection({
     seal_ok: boolean
     premium?: number | null
   } | null>(null)
+  const [stageBusy, setStageBusy] = useState(false)
 
   const [links, setLinks] = useState<LinkHarvest[]>([])
   const [linksTotal, setLinksTotal] = useState(0)
@@ -248,12 +249,49 @@ export function QuantomosSection({
         content: q.content,
         hermetic_weight: q.hermetic_weight,
         universe: q.universe,
+        recognized: q.recognized,
+        stage: q.stage,
+        source_kind: q.source_kind,
         entry_id: q.entry_id,
         entry_title: q.entry_title,
         timestamp_exact: q.timestamp_exact,
         original_filename: q.original_filename,
       })),
     })
+  }
+
+  async function handlePromoteSelected() {
+    if (!selectedId || stageBusy) return
+    setStageBusy(true)
+    setError(null)
+    try {
+      await api.promoteQuantomoPre(selectedId, { profile: { campamento: true } })
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo pasar a pre')
+    } finally {
+      setStageBusy(false)
+    }
+  }
+
+  async function handleSealSelected() {
+    if (!selectedId || stageBusy) return
+    setStageBusy(true)
+    setError(null)
+    try {
+      const stage = selected?.stage ?? 'proto'
+      if (stage === 'proto') {
+        await api.applyQuantomoSeal({ ids: [selectedId] })
+      } else {
+        await api.sealQuantomo(selectedId)
+      }
+      setStageFilter('sealed')
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo sellar')
+    } finally {
+      setStageBusy(false)
+    }
   }
 
   async function handleBackfill() {
@@ -280,7 +318,7 @@ export function QuantomosSection({
             <h2>{pane === 'quantomos' ? 'Quántomos' : 'Links'}</h2>
             <p className="muted mono">
               {pane === 'quantomos'
-                ? `Unidades de sentido validadas${quantomos.length > 0 ? ` · ${quantomos.length}` : ''}${avgWeight != null ? ` · peso medio ${avgWeight}` : ''}`
+                ? `Átomos por etapa · Corpus RAG = sellados${quantomos.length > 0 ? ` · ${quantomos.length}` : ''}${avgWeight != null ? ` · peso medio ${avgWeight}` : ''}`
                 : `Receptor de URLs del corpus · ${linksTotal} en harvest`}
             </p>
           </div>
@@ -476,7 +514,15 @@ export function QuantomosSection({
             ) : filtered.length === 0 ? (
               <p className="muted mono">
                 {quantomos.length === 0
-                  ? 'Sin quántomos validados todavía'
+                  ? stageFilter === 'sealed'
+                    ? 'Sin quántomos sellados. Este filtro es el Corpus. Mirá Proto o Todos. El sello está en Castillo (Alt+Q) o en Respaldo → Aplicar voto.'
+                    : stageFilter === 'proto'
+                      ? 'Sin protoquántomos.'
+                      : stageFilter === 'pre'
+                        ? 'Sin prequántomos.'
+                        : stageFilter === 'premium'
+                          ? 'Sin premium (peso ≥ 7 y sello L72).'
+                          : 'Sin quántomos todavía.'
                   : 'Nada con este filtro'}
               </p>
             ) : (
@@ -532,6 +578,29 @@ export function QuantomosSection({
                           selected.timestamp_exact || selected.entry_created_at,
                         )}
                       </p>
+                      {(selected.stage === 'proto' ||
+                        selected.stage === 'pre') && (
+                        <div className="entity-head-actions">
+                          {selected.stage === 'proto' && (
+                            <button
+                              type="button"
+                              className="btn btn-tiny"
+                              disabled={stageBusy}
+                              onClick={() => void handlePromoteSelected()}
+                            >
+                              {stageBusy ? '…' : 'Pre'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-tiny"
+                            disabled={stageBusy}
+                            onClick={() => void handleSealSelected()}
+                          >
+                            {stageBusy ? '…' : 'Sellar'}
+                          </button>
+                        </div>
+                      )}
                       <div className="quantomo-body">
                         {selected.content?.trim() ? (
                           selected.content

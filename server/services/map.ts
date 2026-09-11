@@ -154,77 +154,89 @@ export function listTags(db: DatabaseSync, systemId: string): MapTag[] {
   }))
 }
 
-export function occupancyCounts(db: DatabaseSync): MapOccupancyCounts[] {
+export function occupancyCounts(
+  db: DatabaseSync,
+  dayKey?: string,
+): MapOccupancyCounts[] {
   const bag = new Map<string, MapOccupancyCounts>()
 
+  const entrySql = dayKey
+    ? `SELECT place_id, COUNT(*) AS c FROM entries
+       WHERE place_id IS NOT NULL
+         AND (
+           substr(ifnull(timestamp_exact, created_at), 1, 10) = ?
+           OR substr(created_at, 1, 10) = ?
+         )
+       GROUP BY place_id`
+    : `SELECT place_id, COUNT(*) AS c FROM entries
+       WHERE place_id IS NOT NULL GROUP BY place_id`
   for (const r of rows<{ place_id: string; c: number }>(
-    db
-      .prepare(
-        `SELECT place_id, COUNT(*) AS c FROM entries
-         WHERE place_id IS NOT NULL GROUP BY place_id`,
-      )
-      .all(),
+    dayKey
+      ? db.prepare(entrySql).all(dayKey, dayKey)
+      : db.prepare(entrySql).all(),
   )) {
     bump(bag, r.place_id, 'entries', r.c)
   }
 
-  for (const r of rows<{ place_id: string; kind: string; c: number }>(
-    db
-      .prepare(
-        `SELECT object_id AS place_id, target_kind AS kind, COUNT(*) AS c
-         FROM ama_links
-         WHERE object_type = 'place'
-         GROUP BY object_id, target_kind`,
-      )
-      .all(),
-  )) {
-    if (r.kind === 'person') bump(bag, r.place_id, 'persons', r.c)
-    else if (r.kind === 'project') bump(bag, r.place_id, 'projects', r.c)
-    else if (r.kind === 'agrupacion') bump(bag, r.place_id, 'agrupaciones', r.c)
-  }
+  if (!dayKey) {
+    for (const r of rows<{ place_id: string; kind: string; c: number }>(
+      db
+        .prepare(
+          `SELECT object_id AS place_id, target_kind AS kind, COUNT(*) AS c
+           FROM ama_links
+           WHERE object_type = 'place'
+           GROUP BY object_id, target_kind`,
+        )
+        .all(),
+    )) {
+      if (r.kind === 'person') bump(bag, r.place_id, 'persons', r.c)
+      else if (r.kind === 'project') bump(bag, r.place_id, 'projects', r.c)
+      else if (r.kind === 'agrupacion') bump(bag, r.place_id, 'agrupaciones', r.c)
+    }
 
-  for (const r of rows<{ place_id: string; c: number }>(
-    db
-      .prepare(
-        `SELECT place_id, COUNT(*) AS c FROM ama_list_items
-         WHERE place_id IS NOT NULL GROUP BY place_id`,
-      )
-      .all(),
-  )) {
-    bump(bag, r.place_id, 'amazona_items', r.c)
-  }
+    for (const r of rows<{ place_id: string; c: number }>(
+      db
+        .prepare(
+          `SELECT place_id, COUNT(*) AS c FROM ama_list_items
+           WHERE place_id IS NOT NULL GROUP BY place_id`,
+        )
+        .all(),
+    )) {
+      bump(bag, r.place_id, 'amazona_items', r.c)
+    }
 
-  for (const r of rows<{ place_id: string; c: number }>(
-    db
-      .prepare(
-        `SELECT target_id AS place_id, COUNT(*) AS c FROM ama_links
-         WHERE target_kind = 'place' GROUP BY target_id`,
-      )
-      .all(),
-  )) {
-    bump(bag, r.place_id, 'amazona_items', r.c)
-  }
+    for (const r of rows<{ place_id: string; c: number }>(
+      db
+        .prepare(
+          `SELECT target_id AS place_id, COUNT(*) AS c FROM ama_links
+           WHERE target_kind = 'place' GROUP BY target_id`,
+        )
+        .all(),
+    )) {
+      bump(bag, r.place_id, 'amazona_items', r.c)
+    }
 
-  for (const r of rows<{ place_id: string; c: number }>(
-    db
-      .prepare(
-        `SELECT place_id, COUNT(*) AS c FROM ama_cells
-         WHERE place_id IS NOT NULL GROUP BY place_id`,
-      )
-      .all(),
-  )) {
-    bump(bag, r.place_id, 'amazona_cells', r.c)
-  }
+    for (const r of rows<{ place_id: string; c: number }>(
+      db
+        .prepare(
+          `SELECT place_id, COUNT(*) AS c FROM ama_cells
+           WHERE place_id IS NOT NULL GROUP BY place_id`,
+        )
+        .all(),
+    )) {
+      bump(bag, r.place_id, 'amazona_cells', r.c)
+    }
 
-  for (const r of rows<{ place_id: string; c: number }>(
-    db
-      .prepare(
-        `SELECT place_id, COUNT(*) AS c FROM map_tags
-         WHERE place_id IS NOT NULL GROUP BY place_id`,
-      )
-      .all(),
-  )) {
-    bump(bag, r.place_id, 'tags', r.c)
+    for (const r of rows<{ place_id: string; c: number }>(
+      db
+        .prepare(
+          `SELECT place_id, COUNT(*) AS c FROM map_tags
+           WHERE place_id IS NOT NULL GROUP BY place_id`,
+        )
+        .all(),
+    )) {
+      bump(bag, r.place_id, 'tags', r.c)
+    }
   }
 
   return [...bag.values()].map((c) => ({
@@ -645,6 +657,7 @@ export function isLayerKind(value: unknown): value is MapLayerKind {
 export function buildOverview(
   db: DatabaseSync,
   systemId?: string,
+  dayKey?: string,
 ): MapOverview | { error: string } {
   const systems = listSystems(db)
   const chosen =
@@ -658,7 +671,7 @@ export function buildOverview(
     layers: listLayers(db, chosen.id),
     zones: listZones(db),
     tags: listTags(db, chosen.id),
-    occupancy: occupancyCounts(db),
+    occupancy: occupancyCounts(db, dayKey),
     flows: listMapFlows(db),
     moon: moonPhase(),
   }

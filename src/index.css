@@ -6967,8 +6967,9 @@ body::before {
 .cal-layout {
   position: relative;
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0;
+  gap: 0.45rem;
   min-height: 0;
   flex: 1;
   overflow: hidden;
@@ -7374,7 +7375,7 @@ body::before {
 
 .cal-campamento {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(16rem, 19rem);
+  grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr) minmax(16rem, 19rem);
   gap: 0.85rem;
   min-height: 0;
   height: 100%;
@@ -7890,6 +7891,215 @@ body::before {
   background:
     radial-gradient(circle at 70% 35%, #0e1012 0 28%, transparent 30%),
     radial-gradient(circle at 58% 38%, var(--accent) 0 42%, #0a0b0c 58%);
+}
+
+.cal-day-col.is-dim {
+  opacity: 0.45;
+}
+
+.cal-day-bands {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.cal-day-band {
+  border-top: 1px dashed var(--line);
+  padding-top: 0.4rem;
+}
+
+.cal-energy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.cal-energy-row {
+  display: grid;
+  grid-template-columns: 3.6rem 1fr 1.4rem;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 0.72rem;
+  text-transform: capitalize;
+}
+
+.cal-split-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.cal-mission-deck {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  padding: 0.75rem 0.7rem;
+}
+
+.cal-deck-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.cal-deck-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.cal-mission-card {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--line);
+  background: var(--bg-ink);
+  color: inherit;
+  cursor: grab;
+}
+
+.cal-mission-card.is-suggestion {
+  border-color: color-mix(in srgb, #c9922a 55%, var(--line));
+}
+
+.cal-mission-card.is-locked {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.cal-mission-meta {
+  font-size: 0.62rem;
+  color: var(--alabaster-dim);
+}
+
+.cal-mission-title {
+  font-size: 0.78rem;
+}
+
+.cal-mission-skip {
+  font-size: 0.62rem;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.cal-matrix-cell.is-drop {
+  box-shadow: inset 0 0 0 1px #c9922a, 0 0 12px color-mix(in srgb, #c9922a 45%, transparent);
+  background: color-mix(in srgb, #c9922a 18%, transparent);
+}
+
+.cal-ribbon {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  gap: 0.25rem 0.65rem;
+  align-items: center;
+  padding: 0.35rem 0.2rem 0.15rem;
+  border-top: 1px solid var(--line);
+}
+
+.cal-ribbon-meta {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.65rem;
+}
+
+.cal-ribbon-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 2.4rem;
+  min-width: 0;
+}
+
+.cal-ribbon-col {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cal-ribbon-bar {
+  width: 100%;
+  background: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.cal-ribbon-col.is-focus .cal-ribbon-bar {
+  background: var(--accent);
+}
+
+.cal-ribbon-slider {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.cal-lunar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.cal-lunar-grid .cal-lunar-bead {
+  position: relative;
+  left: auto;
+  top: auto;
+  width: auto;
+  min-height: 4.2rem;
+  transform: none;
+}
+
+.cal-lunar-bead.is-heat-new {
+  box-shadow: 0 0 10px color-mix(in srgb, #7aa7c7 50%, transparent);
+}
+
+.cal-lunar-bead.is-heat-full {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.cal-tapiz-toggle,
+.cal-float-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0.6rem;
+}
+
+.cal-float-chip {
+  font-size: 0.68rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px dashed var(--line);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cal-tide.is-nueva .cal-tide-bar,
+.cal-tide.is-llena .cal-tide-bar {
+  animation: cal-tide-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes cal-tide-pulse {
+  0%,
+  100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (max-width: 1100px) {
@@ -10175,6 +10385,12 @@ body:has(.app-shell.is-sentinela-mode) {
   font-size: 0.78rem;
 }
 
+.cal-pipe-list.is-scroll {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
 .cal-pipe-item {
   display: flex;
   align-items: center;
@@ -12086,6 +12302,116 @@ body:has(.app-shell.is-sentinela-mode) {
     grid-template-columns: 1fr;
   }
 }
+
+.todos-section .todos-lead {
+  margin: 0 0 0.75rem;
+  max-width: 42rem;
+}
+
+.todos-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.todos-hold-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--alabaster-dim);
+}
+
+.todos-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0 0 0.65rem;
+}
+
+.todo-list {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.todo-card {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+
+.todo-card.is-accepted {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.todo-card.is-done {
+  opacity: 0.65;
+}
+
+.todo-card.is-dismissed {
+  opacity: 0.5;
+}
+
+.todo-card h3 {
+  margin: 0.25rem 0 0.2rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.todo-why {
+  margin: 0 0 0.5rem;
+  color: var(--alabaster-dim);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.todo-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.75rem;
+}
+
+.todo-priority {
+  color: var(--accent);
+}
+
+.todo-horizon {
+  text-transform: lowercase;
+}
+
+.todo-rule {
+  margin-left: auto;
+}
+
+.todo-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0 0 0.5rem;
+}
+
+.todo-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.cal-chip.is-todo-hold {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.cal-pole.is-todo {
+  color: var(--accent);
+}
+
 
 
 

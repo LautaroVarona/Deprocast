@@ -108,7 +108,17 @@ Archivo: `src/lib/calendar/engine.ts`.
 
 `PATCH /api/calendar/tasks/:taskId` marca tareas hechas / no hechas.
 
+La matriz 6×6, el presupuesto energético y las simulaciones de tipologías viven en SQLite:
+
+- `GET/PUT /api/calendar/matrix?week=` → `calendar_week_matrix` (el `localStorage` queda cache)
+- `GET/PUT /api/calendar/energy?day=` → `calendar_day_energy` (Cuerpo/Mente/Alma 1–12 + split 2/3)
+- `GET /api/calendar/simulations?week=` → heurística de las 6 tipologías vs la matriz humana
+
+El mazo de Campamento lee `suggested_todos` (`GET /api/todos`). Aceptar una carta (`POST /api/todos/:id/accept` con hold) sella `hold_at` + `intention_at`. Hecho escribe `collapsed_at`. El Task-Breaker parte ítems de más de 40 minutos en `ludus_microtask` de 15/25/40.
+
 La ingesta desde Trinchera reutiliza el pipeline general (`ingestAudioOne` + `runPipeline`, o `ingestBlob`).
+
+El foco de fecha se publica en `localStorage` (`deprocast.calendar.focus`) para que la capa chronos del mapa filtre ocupación de ese día.
 
 ---
 
@@ -121,14 +131,19 @@ La ingesta desde Trinchera reutiliza el pipeline general (`ingestAudioOne` + `ru
 | Diario | `src/components/calendario/TrincheraView.tsx`, `SensoryClock.tsx`, `ActivityChipList.tsx` |
 | Semana | `src/components/calendario/CampamentoView.tsx` |
 | Ciclo 28 | `src/components/calendario/CastilloView.tsx` |
+| Cinta | `src/components/calendario/TimeRibbon.tsx` |
 | Motor | `src/lib/calendar/engine.ts` |
-| API | `server/routes/calendar.ts` |
+| Persistencia Chronos | `server/services/calendarChronos.ts` |
+| Sugeridor / Task-Breaker | `server/services/suggestedTodos.ts` |
+| API | `server/routes/calendar.ts`, `server/routes/todos.ts` |
 | Estilos | `src/index.css` (bloque Calendario dimensional) |
 
 ---
 
 ## 8. Fuera de este módulo (huecos)
 
-No viven en el calendario, aunque las fuentes los nombren: telemetría Oura/HRV, NLP tipo `/paterna luna llena`, scrubber inferior tipo editor de video, HUD RPG (HP/MP/EXP), simulación Intención vs Colapso con agentes ejecutando, astronomía real de Saturno, Daily Thread como chat con Mastropiero.
+Siguen fuera: telemetría Oura/HRV/anillo, NLP tipo `/paterna luna llena`, HUD RPG (HP/MP/EXP), astronomía real de Saturno, Daily Thread como chat con Mastropiero, Prisma.
+
+Entra en este módulo (heurístico, sin sensores): Time Ribbon, presupuesto energético local, división 2/3 de la jornada, mazo + coagulación IMMUTABLE/ROUTINE/SUGGESTION, matriz SQLite, simulación de las 6 tipologías (fricción intención vs colapso), grilla 4×7 del Castillo y puente de foco al mapa.
 
 El calendario lee lo que ya está en SQLite y organiza el tiempo. No inventa sensores ni oráculos generativos.

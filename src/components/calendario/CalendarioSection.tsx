@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../services/api'
-import type { AppRun, CalendarOccurrence, CalendarTask } from '../../types'
+import type {
+  AmaPlace,
+  AppRun,
+  CalendarDayEnergy,
+  CalendarOccurrence,
+  CalendarSimulation,
+  CalendarTask,
+  SuggestedTodo,
+} from '../../types'
 import {
   addDays,
   cycle28Containing,
+  persistCalendarFocus,
   runDayNumber,
   startOfLocalDay,
   startOfWeekMonday,
@@ -16,6 +25,7 @@ import { DimensionalNavigator } from './DimensionalNavigator'
 import { TrincheraView } from './TrincheraView'
 import { CampamentoView, readWeekMatrix, persistWeekMatrix } from './CampamentoView'
 import { CastilloView } from './CastilloView'
+import { TimeRibbon } from './TimeRibbon'
 import { useClockNow } from './SensoryClock'
 
 type Props = {
@@ -73,6 +83,19 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
   const [trident, setTrident] = useState<TridentId>(readTrident)
   const [hideNativeInfo, setHideNativeInfo] = useState(readHideNativeInfo)
   const [occurrences, setOccurrences] = useState<CalendarOccurrence[]>([])
+  const [todoHolds, setTodoHolds] = useState<SuggestedTodo[]>([])
+  const [deckTodos, setDeckTodos] = useState<SuggestedTodo[]>([])
+  const [energy, setEnergy] = useState<CalendarDayEnergy>({
+    day: toDayKey(startOfLocalDay(new Date())),
+    cuerpo: 8,
+    mente: 8,
+    alma: 8,
+    source: 'manual',
+    split_mode: '3',
+  })
+  const [simulations, setSimulations] = useState<CalendarSimulation[]>([])
+  const [tidePlaces, setTidePlaces] = useState<AmaPlace[]>([])
+  const [deckBusy, setDeckBusy] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [ingestBusy, setIngestBusy] = useState(false)
@@ -105,12 +128,49 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
   }, [setDim])
 
   useEffect(() => {
+    persistCalendarFocus(focus)
+  }, [focus])
+
+  useEffect(() => {
     setMatrixMap(readWeekMatrix(weekKey))
+    void api
+      .getCalendarMatrix(weekKey)
+      .then((res) => {
+        setMatrixMap(res.map)
+        persistWeekMatrix(weekKey, res.map)
+      })
+      .catch(() => {
+        /* cache local */
+      })
+    void api
+      .getCalendarSimulations(weekKey, true)
+      .then((res) => setSimulations(res.simulations))
+      .catch(() => setSimulations([]))
   }, [weekKey])
+
+  useEffect(() => {
+    const day = toDayKey(focus)
+    void api
+      .getCalendarEnergy(day)
+      .then((res) => setEnergy(res.energy))
+      .catch(() => {
+        setEnergy({
+          day,
+          cuerpo: 8,
+          mente: 8,
+          alma: 8,
+          source: 'manual',
+          split_mode: '3',
+        })
+      })
+  }, [focus])
 
   function updateMatrix(next: Record<string, number>) {
     setMatrixMap(next)
     persistWeekMatrix(weekKey, next)
+    void api.putCalendarMatrix(weekKey, next).catch(() => {
+      /* keep local cache */
+    })
   }
 
   const range = useMemo(() => {
@@ -126,6 +186,31 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
     try {
       const data = await api.getCalendarActivity(range.from, range.to)
       setOccurrences(data.occurrences)
+      try {
+        const holds = await api.listSuggestedTodos({
+          from: range.from,
+          to: range.to,
+        })
+        setTodoHolds(
+          holds.todos.filter(
+            (t) => t.hold_at && (t.status === 'accepted' || t.status === 'suggested' || t.status === 'done'),
+          ),
+        )
+      } catch {
+        setTodoHolds([])
+      }
+      try {
+        const deck = await api.listSuggestedTodos({ status: 'suggested' })
+        setDeckTodos(deck.todos)
+      } catch {
+        setDeckTodos([])
+      }
+      try {
+        const map = await api.mapOverview()
+        setTidePlaces(map.zones ?? [])
+      } catch {
+        setTidePlaces([])
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al leer el calendario')
     } finally {
@@ -155,6 +240,60 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
     })
   }
 
+  async function onEnergyPatch(patch: Partial<CalendarDayEnergy>) {
+    const day = toDayKey(focus)
+    try {
+      const res = await api.putCalendarEnergy(day, patch)
+      setEnergy(res.energy)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo guardar la energía')
+    }
+  }
+
+  async function onPlaceDeck(todo: SuggestedTodo, cell: number) {
+    try {
+      setDeckBusy(true)
+      await api.acceptSuggestedTodo(todo.id, { create_calendar_hold: true })
+      const next = { ...matrixMap, [todo.id]: cell }
+      updateMatrix(next)
+      await load()
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo sellar la carta')
+    } finally {
+      setDeckBusy(false)
+    }
+  }
+
+  async function onSkipRoutine(todo: SuggestedTodo) {
+    try {
+      await api.dismissSuggestedTodo(todo.id)
+      await load()
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo saltar la rutina')
+    }
+  }
+
+  async function onRegenerateDeck() {
+    try {
+      setDeckBusy(true)
+      await api.regenerateSuggestedTodos(false)
+      await load()
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo regenerar el mazo')
+    } finally {
+      setDeckBusy(false)
+    }
+  }
+
+  const ribbonBounds = useMemo(() => {
+    const cycle = cycle28Containing(focus)
+    return { from: addDays(cycle.start, -28), to: addDays(cycle.start, 56) }
+  }, [focus])
+
+  const hideHighGravity = energy.mente < 5 || energy.cuerpo < 5
   const visibleOccurrences = hideNativeInfo ? [] : occurrences
 
   async function onToggleTask(task: CalendarTask) {
@@ -164,6 +303,18 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
       onChanged?.()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo actualizar la tarea')
+    }
+  }
+
+  async function onToggleTodoHold(todo: SuggestedTodo) {
+    try {
+      await api.patchSuggestedTodo(todo.id, {
+        status: todo.status === 'done' ? 'accepted' : 'done',
+      })
+      await load()
+      onChanged?.()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo actualizar el hold')
     }
   }
 
@@ -312,11 +463,17 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
               onClockSkin={setSkin}
               onTrident={setTri}
               onToggleTask={onToggleTask}
+              todoHolds={todoHolds}
+              onToggleTodoHold={onToggleTodoHold}
               onIngestAudio={onIngestAudio}
               onIngestNote={onIngestNote}
               ingestBusy={ingestBusy}
               ingestStatus={ingestStatus}
               ingestError={ingestError}
+              energy={energy}
+              onEnergy={onEnergyPatch}
+              hideHighGravity={hideHighGravity}
+              dimSideDays
             />
           )}
           {dimension === 'campamento' && (
@@ -328,8 +485,17 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
               trident={trident}
               onMatrixMap={updateMatrix}
               onToggleTask={onToggleTask}
+              todoHolds={todoHolds}
+              onToggleTodoHold={onToggleTodoHold}
               onTrident={setTri}
               onSelectDay={(date) => setFocus(startOfLocalDay(date))}
+              deckTodos={deckTodos}
+              hideHighGravity={hideHighGravity}
+              simulations={simulations}
+              onPlaceDeck={(todo, cell) => void onPlaceDeck(todo, cell)}
+              onSkipRoutine={(todo) => void onSkipRoutine(todo)}
+              onRegenerateDeck={() => void onRegenerateDeck()}
+              deckBusy={deckBusy}
             />
           )}
           {dimension === 'castillo' && (
@@ -338,9 +504,19 @@ export function CalendarioSection({ refreshKey, onChanged, run }: Props) {
               today={today}
               occurrences={visibleOccurrences}
               onSelectDay={onSelectCastilloDay}
+              places={tidePlaces}
+              holds={todoHolds}
             />
           )}
         </div>
+        <TimeRibbon
+          from={ribbonBounds.from}
+          to={ribbonBounds.to}
+          focus={focus}
+          occurrences={visibleOccurrences}
+          holds={todoHolds}
+          onFocus={(date) => setFocus(startOfLocalDay(date))}
+        />
       </div>
     </section>
   )

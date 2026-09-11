@@ -45,6 +45,7 @@ El historial Git anterior puede contener dumps; reescribir historial es un paso 
 
 ## Docs
 
+- `docs/auditoria-2026-09-11.md` — mapa 0.7.1 vs código (11 sep 2026)
 - `rumbo.md`, `reporte0708.md` — diseño / archivo
 - `docs/threat-model-backup.md` — cifrado de backups
 - `docs/slo.md`, `docs/restore-drill.md`, `docs/upgrade-policy.md`

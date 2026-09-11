@@ -37,6 +37,7 @@ import { sentinelRouter } from './routes/sentinel.js'
 import { liveRouter } from './routes/live.js'
 import { configRouter } from './routes/config.js'
 import { knowledgeRouter } from './routes/knowledge.js'
+import { todosRouter } from './routes/todos.js'
 import { kickKnowledgeJobs } from './services/knowledge.js'
 import { attachLiveWsProxy } from './liveWs.js'
 import { capabilities, validateEnv } from './config.js'
@@ -152,6 +153,7 @@ app.use('/api/sentinela', sentinelRouter)
 app.use('/api/live', liveRouter)
 app.use('/api/config', configRouter)
 app.use('/api/knowledge', knowledgeRouter)
+app.use('/api/todos', todosRouter)
 
 app.use(
   (

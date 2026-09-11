@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  extractQuantomoIdsFromVotePayload,
   parseQuantomoExportStage,
   quantomoStageExportBasename,
   QUANTOMO_STAGE_FILE_SLUG,
@@ -17,6 +18,31 @@ describe('parseQuantomoExportStage', () => {
     expect(parseQuantomoExportStage('Quántomos')).toBe(null)
     expect(parseQuantomoExportStage('all')).toBe(null)
     expect(parseQuantomoExportStage('')).toBe(null)
+  })
+})
+
+describe('extractQuantomoIdsFromVotePayload', () => {
+  it('lee dump de etapa, export de Corpus, ids sueltos y arrays', () => {
+    const a = '11111111-1111-4111-8111-111111111111'
+    const b = '22222222-2222-4222-8222-222222222222'
+    expect(
+      extractQuantomoIdsFromVotePayload({
+        format: 'deprocast-quantomos',
+        quantomos: [{ id: a }, { id: b }, { id: a }],
+      }),
+    ).toEqual([a, b])
+    expect(
+      extractQuantomoIdsFromVotePayload({
+        source: 'deprocast-quantomos',
+        quantomos: [{ id: a, title: 'x' }],
+      }),
+    ).toEqual([a])
+    expect(extractQuantomoIdsFromVotePayload({ ids: [a, b] })).toEqual([a, b])
+    expect(extractQuantomoIdsFromVotePayload([a, { id: b }])).toEqual([a, b])
+    expect(
+      extractQuantomoIdsFromVotePayload({ format: 'deprocast-quantomos' }),
+    ).toEqual([])
+    expect(extractQuantomoIdsFromVotePayload(null)).toEqual([])
   })
 })
 

@@ -4,6 +4,7 @@ import { getClientLogs } from '../lib/clientLogs'
 
 const VIEW_LABELS: Record<string, string> = {
   dashboard: 'Dashboard',
+  tareas: 'Tareas',
   franca: 'Zona franca',
   directo: 'Directo',
   aduana: 'Aduana',
@@ -15,7 +16,8 @@ const VIEW_LABELS: Record<string, string> = {
   biblioteca: 'Biblioteca',
   conocimiento: 'Conocimiento',
   chats: 'Chats',
-  dialogo: 'Diálogo',
+  sentinela: 'Sentinela',
+  atlas: 'Atlas',
   respaldo: 'Respaldo',
   configuracion: 'Configuración',
   calendario: 'Calendario',

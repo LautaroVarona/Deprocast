@@ -30,7 +30,12 @@ function asNumber(value: unknown): number | null {
 
 mapRouter.get('/overview', (req, res) => {
   const systemId = asString(req.query.system_id)
-  const overview = buildOverview(getDb(), systemId || undefined)
+  const day = asString(req.query.day)
+  const overview = buildOverview(
+    getDb(),
+    systemId || undefined,
+    /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : undefined,
+  )
   if ('error' in overview) {
     res.status(404).json({ error: overview.error })
     return

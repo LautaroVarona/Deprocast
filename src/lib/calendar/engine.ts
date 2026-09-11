@@ -152,6 +152,75 @@ export function getAlchemyForDate(date: Date): AlchemyDay {
   return WEEKDAY_ALCHEMY[mondayIndex(date)] ?? WEEKDAY_ALCHEMY[0]
 }
 
+export const CAL_FOCUS_LS = 'deprocast.calendar.focus'
+export const CAL_FOCUS_EVENT = 'deprocast-calendar-focus'
+
+export type DaySplitMode = '2' | '3'
+
+export type DaySplitBand = {
+  id: string
+  label: string
+  fromH: number
+  toH: number
+}
+
+export function daySplitBands(mode: DaySplitMode): DaySplitBand[] {
+  if (mode === '2') {
+    return [
+      { id: 'dia', label: 'Día', fromH: 0, toH: 16 },
+      { id: 'noche', label: 'Noche', fromH: 16, toH: 24 },
+    ]
+  }
+  return [
+    { id: 'amanecer', label: 'Amanecer', fromH: 0, toH: 8 },
+    { id: 'tarde', label: 'Tarde', fromH: 8, toH: 16 },
+    { id: 'noche', label: 'Noche', fromH: 16, toH: 24 },
+  ]
+}
+
+export function hourOfIso(iso: string): number {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return 12
+  return d.getHours()
+}
+
+export function floatingGregorianDays(focus: Date): Date[] {
+  const cycle = cycle28Containing(focus)
+  const inCycle = new Set(cycle.days.map(toDayKey))
+  const year = focus.getFullYear()
+  const month = focus.getMonth()
+  const last = new Date(year, month + 1, 0).getDate()
+  const out: Date[] = []
+  for (let d = 1; d <= last; d++) {
+    const date = new Date(year, month, d)
+    if (!inCycle.has(toDayKey(date))) out.push(date)
+  }
+  return out
+}
+
+export function persistCalendarFocus(date: Date): void {
+  const key = toDayKey(date)
+  localStorage.setItem(CAL_FOCUS_LS, key)
+  window.dispatchEvent(new CustomEvent(CAL_FOCUS_EVENT, { detail: key }))
+}
+
+export function readCalendarFocus(): string | null {
+  return localStorage.getItem(CAL_FOCUS_LS)
+}
+
+export function ribbonDays(from: Date, to: Date): Date[] {
+  const start = startOfLocalDay(from)
+  const end = startOfLocalDay(to)
+  const out: Date[] = []
+  let cur = start
+  while (cur.getTime() <= end.getTime()) {
+    out.push(cur)
+    cur = addDays(cur, 1)
+    if (out.length > 120) break
+  }
+  return out
+}
+
 export function cycle28Containing(date: Date): {
   start: Date
   days: Date[]

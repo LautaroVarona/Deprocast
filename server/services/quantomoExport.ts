@@ -34,6 +34,51 @@ export function parseQuantomoExportStage(raw: unknown): QuantomoExportStage | nu
   return null
 }
 
+function pushQuantomoId(ids: string[], seen: Set<string>, raw: unknown): void {
+  const s = String(raw ?? '').trim()
+  if (!s || seen.has(s)) return
+  seen.add(s)
+  ids.push(s)
+}
+
+/**
+ * Ids de un voto externo / dump de etapa. Acepta:
+ * - `{ format: 'deprocast-quantomos', quantomos: [{ id }] }`
+ * - `{ source: 'deprocast-quantomos', quantomos: [{ id }] }` (export de Corpus)
+ * - `{ ids: string[] }`
+ * - array de strings o de `{ id }`
+ */
+export function extractQuantomoIdsFromVotePayload(raw: unknown): string[] {
+  const ids: string[] = []
+  const seen = new Set<string>()
+  if (raw == null) return ids
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === 'string' || typeof item === 'number') {
+        pushQuantomoId(ids, seen, item)
+      } else if (item && typeof item === 'object' && 'id' in item) {
+        pushQuantomoId(ids, seen, (item as { id: unknown }).id)
+      }
+    }
+    return ids
+  }
+  if (typeof raw !== 'object') return ids
+  const rec = raw as Record<string, unknown>
+  if (Array.isArray(rec.ids)) {
+    for (const id of rec.ids) pushQuantomoId(ids, seen, id)
+  }
+  if (Array.isArray(rec.quantomos)) {
+    for (const q of rec.quantomos) {
+      if (q && typeof q === 'object' && 'id' in q) {
+        pushQuantomoId(ids, seen, (q as { id: unknown }).id)
+      } else if (typeof q === 'string') {
+        pushQuantomoId(ids, seen, q)
+      }
+    }
+  }
+  return ids
+}
+
 export function quantomoStageExportBasename(stage: QuantomoExportStage): string {
   const day = new Date().toISOString().slice(0, 10)
   return `deprocast-${QUANTOMO_STAGE_FILE_SLUG[stage]}-${day}`

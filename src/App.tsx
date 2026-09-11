@@ -16,10 +16,10 @@ import { CalendarioSection } from './components/calendario/CalendarioSection'
 import { AmazonaSection } from './components/AmazonaSection'
 import { MapaSection } from './components/mapa/MapaSection'
 import { AtlasSection } from './components/atlas/AtlasSection'
-import {
-  DashboardSection,
+import { DashboardSection,
   type DashboardNavigateTarget,
 } from './components/DashboardSection'
+import { TodosSection, type TodosNavigateTarget } from './components/TodosSection'
 import { DialogoSection } from './components/dialogo/DialogoSection'
 import { SentinelSection } from './components/sentinel/SentinelSection'
 import { DirectoSection } from './components/DirectoSection'
@@ -172,6 +172,20 @@ export default function App() {
     setView(target.view)
   }, [])
 
+  const onTodosNavigate = useCallback((target: TodosNavigateTarget) => {
+    preferHome.current = true
+    if (target.view === 'deprocast-ida') {
+      navigate('/deprocast/ida')
+      return
+    }
+    if (target.view === 'entidades') {
+      setEntityMode(target.mode)
+      setView('entidades')
+      return
+    }
+    setView(target.view)
+  }, [])
+
   const aduanaHot = hasPending || pipelineRunning
   const entityPending = personPending + projectPending
 
@@ -279,6 +293,7 @@ export default function App() {
                 view === 'conocimiento' ||
                 view === 'chats' ||
                 view === 'dialogo' ||
+                view === 'tareas' ||
                 view === 'sentinela' ||
                 view === 'respaldo' ||
                 view === 'configuracion' ||
@@ -299,6 +314,12 @@ export default function App() {
             operatorName={run.operator_name}
             refreshKey={refreshKey}
             onNavigate={onDashboardNavigate}
+          />
+        ) : view === 'tareas' ? (
+          <TodosSection
+            refreshKey={refreshKey}
+            onChanged={bump}
+            onNavigate={onTodosNavigate}
           />
         ) : view === 'directo' ? (
           <DirectoSection />
