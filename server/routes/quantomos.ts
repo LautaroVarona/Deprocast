@@ -2,14 +2,18 @@ import { Router } from 'express'
 import { getDb } from '../db.js'
 import { row, rows } from '../sql.js'
 import {
+  applyQuantomoSeals,
   chestSnapshot,
   getLatticeView,
+  getQuantomoById,
   listQuantomosByStage,
+  promoteQuantomosToPre,
   promoteToPre,
   resonateQuantomo,
   sealQuantomo,
   type QuantomoStageRow,
 } from '../services/quantomoStages.js'
+import { extractQuantomoIdsFromVotePayload } from '../services/quantomoExport.js'
 import type { QuantomoStage } from '../services/lattice72.js'
 
 export const quantomosRouter = Router()
@@ -70,6 +74,56 @@ quantomosRouter.get('/chest', (_req, res) => {
   }
 })
 
+quantomosRouter.post('/promote-pre-batch', (req, res) => {
+  try {
+    const body = (req.body ?? {}) as {
+      ids?: unknown
+      payload?: unknown
+      universe?: string | null
+      profile?: Record<string, unknown>
+      calendar?: Record<string, unknown>
+    }
+    const ids = [
+      ...extractQuantomoIdsFromVotePayload(body.ids),
+      ...extractQuantomoIdsFromVotePayload(body.payload),
+    ]
+    if (ids.length === 0) {
+      res.status(400).json({ error: 'Pasá ids o un JSON de quántomos' })
+      return
+    }
+    const result = promoteQuantomosToPre(ids, {
+      universe: body.universe,
+      profile: body.profile ?? { campamento: true },
+      calendar: body.calendar,
+    })
+    res.json({ ok: true, ...result, count: ids.length })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: msg })
+  }
+})
+
+quantomosRouter.post('/apply-seal', (req, res) => {
+  try {
+    const body = (req.body ?? {}) as { ids?: unknown; payload?: unknown }
+    const ids = [
+      ...extractQuantomoIdsFromVotePayload(body.ids),
+      ...extractQuantomoIdsFromVotePayload(body.payload),
+      ...extractQuantomoIdsFromVotePayload(body),
+    ]
+    const unique = [...new Set(ids)]
+    if (unique.length === 0) {
+      res.status(400).json({ error: 'Pasá ids o un JSON de quántomos con id' })
+      return
+    }
+    const result = applyQuantomoSeals(unique)
+    res.json({ ok: true, ...result, count: unique.length })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    res.status(400).json({ error: msg })
+  }
+})
+
 quantomosRouter.get('/:id/lattice', (req, res) => {
   try {
     res.json({ ok: true, ...getLatticeView(String(req.params.id)) })
@@ -120,8 +174,7 @@ quantomosRouter.post('/:id/seal', (req, res) => {
 
 quantomosRouter.get('/:id', (req, res) => {
   const db = getDb()
-  const all = listQuantomosByStage('all')
-  const quantomo = all.find((q) => q.id === req.params.id)
+  const quantomo = getQuantomoById(String(req.params.id))
   if (!quantomo) {
     res.status(404).json({ error: 'Quántomo no encontrado' })
     return

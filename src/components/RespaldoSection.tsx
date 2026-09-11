@@ -93,6 +93,8 @@ export function RespaldoSection({ refreshKey, run }: Props) {
   const [operatorConfirm, setOperatorConfirm] = useState('')
   const [newName, setNewName] = useState('')
   const [destroying, setDestroying] = useState(false)
+  const [voteFile, setVoteFile] = useState<File | null>(null)
+  const [applyingVote, setApplyingVote] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -128,6 +130,49 @@ export function RespaldoSection({ refreshKey, run }: Props) {
 
   function downloadQuantomos(stage: 'proto' | 'pre' | 'sealed') {
     window.location.href = `/api/backup/quantomos?stage=${stage}`
+  }
+
+  async function handleApplyVote() {
+    if (!voteFile) return
+    setApplyingVote(true)
+    setError(null)
+    setStatus(null)
+    try {
+      const text = await voteFile.text()
+      let payload: unknown
+      try {
+        payload = JSON.parse(text) as unknown
+      } catch {
+        setError('El archivo no es JSON válido.')
+        setApplyingVote(false)
+        return
+      }
+      const ok = window.confirm(
+        `¿Aplicar este voto a ${voteFile.name}? Proto pasa a pre y se sella (recognized=1, L72). Los ids que ya están sellados se saltan. No crea quántomos nuevos.`,
+      )
+      if (!ok) {
+        setApplyingVote(false)
+        return
+      }
+      const result = await api.applyQuantomoSeal({ payload })
+      const errN = result.errors.length
+      setStatus(
+        `Voto aplicado: ${result.sealed} sellados · ${result.skipped} ya sellados · ${result.missing} no encontrados${errN ? ` · ${errN} error(es)` : ''}. Recargá Quántomos → Sellados.`,
+      )
+      if (errN > 0) {
+        setError(
+          result.errors
+            .slice(0, 4)
+            .map((e) => `${e.id.slice(0, 8)}: ${e.error}`)
+            .join(' · '),
+        )
+      }
+      await load()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo aplicar el voto')
+    } finally {
+      setApplyingVote(false)
+    }
   }
 
   async function handleMerge() {
@@ -349,6 +394,28 @@ export function RespaldoSection({ refreshKey, run }: Props) {
               : ''}
           </button>
         </div>
+        <p className="muted">
+          Si votaste un export fuera de la app (ids de proto/pre), aplicá el
+          JSON acá. No es Fusionar universo. Solo sella ids que ya existen.
+        </p>
+        <input
+          type="file"
+          accept=".json,application/json"
+          onChange={(e) => setVoteFile(e.target.files?.[0] ?? null)}
+        />
+        {voteFile && (
+          <p className="mono muted">
+            {voteFile.name} · {formatBytes(voteFile.size)}
+          </p>
+        )}
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!voteFile || applyingVote}
+          onClick={() => void handleApplyVote()}
+        >
+          {applyingVote ? 'Sellando…' : 'Aplicar voto (JSON)'}
+        </button>
       </div>
 
       <div className="respaldo-block respaldo-merge">

@@ -10175,6 +10175,12 @@ body:has(.app-shell.is-sentinela-mode) {
   font-size: 0.78rem;
 }
 
+.cal-pipe-list.is-scroll {
+  max-height: 22rem;
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
 .cal-pipe-item {
   display: flex;
   align-items: center;

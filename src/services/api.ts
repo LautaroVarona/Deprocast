@@ -1175,8 +1175,8 @@ export const api = {
         status: string
         hermetic_weight: number | null
       }>
-      proto: Quantomo[]
-      pre: Quantomo[]
+      proto: number
+      pre: number
       sealed: number
       premium: number
     }>('/api/quantomos/chest'),
@@ -1194,10 +1194,43 @@ export const api = {
       { method: 'POST', body: JSON.stringify(body ?? {}) },
     ),
 
+  promoteQuantomoPreBatch: (
+    ids: string[],
+    body?: {
+      universe?: string | null
+      profile?: Record<string, unknown>
+      calendar?: Record<string, unknown>
+    },
+  ) =>
+    request<{
+      ok: boolean
+      promoted: number
+      skipped: number
+      missing: number
+      errors: Array<{ id: string; error: string }>
+      count: number
+    }>('/api/quantomos/promote-pre-batch', {
+      method: 'POST',
+      body: JSON.stringify({ ids, ...(body ?? {}) }),
+    }),
+
   sealQuantomo: (id: string) =>
     request<{ ok: boolean; quantomo: Quantomo }>(`/api/quantomos/${id}/seal`, {
       method: 'POST',
       body: '{}',
+    }),
+
+  applyQuantomoSeal: (opts: { ids?: string[]; payload?: unknown }) =>
+    request<{
+      ok: boolean
+      sealed: number
+      skipped: number
+      missing: number
+      errors: Array<{ id: string; error: string }>
+      count: number
+    }>('/api/quantomos/apply-seal', {
+      method: 'POST',
+      body: JSON.stringify(opts),
     }),
 
   getQuantomoLattice: (id: string) =>
