@@ -249,7 +249,7 @@ export const AGENT_CATALOG: DeproAgent[] = [
     idaStage: 'aplicacion',
     status: 'vivo',
     promptStub: 'chatWithTools',
-    notes: 'Motor de inferencia configurable (Groq / Ollama / Stealth / Cohere). Ver Config → Motor de Inferencia.',
+    notes: 'Motor de inferencia configurable (Groq / Ollama / Stealth / NaN / Cohere). Ver Config → Motor de Inferencia.',
   },
   {
     id: 'tejedor',

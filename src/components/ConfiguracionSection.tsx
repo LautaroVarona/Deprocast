@@ -100,7 +100,11 @@ export function ConfiguracionSection({ refreshKey }: Props) {
         Elegí proveedor y modelo por rol. Las API keys siguen en{' '}
         <code>.env</code>; el cambio de selector aplica en runtime sin
         reiniciar. Groq es el default de LLM rápido (ENR). Llama 3 ya no está
-        en Groq: usamos GPT-OSS 120B (calidad) y 20B (velocidad).
+        en Groq: usamos GPT-OSS 120B (calidad) y 20B (velocidad). NaN
+        (nan.builders) está en el catálogo: <code>NAN_API_KEY</code> en{' '}
+        <code>.env</code>. Si Groq y OpenRouter no tienen key, el cerebro y
+        el LLM rápido caen a NaN; el motor de inferencia sigue en Ollama
+        hasta que lo elijas a mano.
       </p>
       {token && (
         <div className="config-block">
@@ -170,6 +174,13 @@ export function ConfiguracionSection({ refreshKey }: Props) {
                 {locked && (
                   <p className="muted config-hint">
                     Por ahora solo este proveedor está cableado para este rol.
+                  </p>
+                )}
+                {providerId === 'nan' && (
+                  <p className="muted config-hint">
+                    NaN: gemma4 y qwen3.6 sin medición; deepseek-v4-flash para
+                    calidad y visión; glm5.3-flash para agentes de código.
+                    glm5.3 premium no está en la lista.
                   </p>
                 )}
                 {slot === 'llm_main' && (

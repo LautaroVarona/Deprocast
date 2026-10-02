@@ -1,5 +1,5 @@
 /**
- * Router LLM: Groq | Ollama | Cohere | OpenRouter según app_settings.
+ * Router LLM: Groq | Ollama | Cohere | OpenRouter | NaN según app_settings.
  * Groq/Ollama pasan por la cola serial (anti-429). Sentinela cae a Ollama.
  */
 import {
@@ -21,6 +21,7 @@ import {
   ollamaChat,
   resolveOllamaModel,
 } from './providers/ollamaChat.js'
+import { nanChat } from './providers/nanChat.js'
 import {
   openrouterChat,
   type OrMessage,
@@ -279,11 +280,13 @@ async function dispatchLlm(
     const keyName =
       route.provider === 'openrouter'
         ? 'OPENROUTER_API_KEY'
-        : route.provider === 'groq'
-          ? 'GROQ_API_KEY'
-          : route.provider === 'gemini'
-            ? 'GEMINI_API_KEY'
-            : 'COHERE_API_KEY'
+        : route.provider === 'nan'
+          ? 'NAN_API_KEY'
+          : route.provider === 'groq'
+            ? 'GROQ_API_KEY'
+            : route.provider === 'gemini'
+              ? 'GEMINI_API_KEY'
+              : 'COHERE_API_KEY'
     throw new Error(`Falta ${keyName} en .env (proveedor ${route.provider})`)
   }
 
@@ -347,8 +350,9 @@ async function dispatchLlm(
     }
   }
 
-  if (route.provider === 'openrouter') {
-    const result = await openrouterChat({
+  if (route.provider === 'openrouter' || route.provider === 'nan') {
+    const chat = route.provider === 'nan' ? nanChat : openrouterChat
+    const result = await chat({
       apiKey: route.apiKey,
       model: route.model,
       messages: opts.messages as OrMessage[],

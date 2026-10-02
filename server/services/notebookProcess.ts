@@ -540,7 +540,7 @@ async function runVisionWorker(): Promise<void> {
           continue
         }
         haltVisionQueue(
-          'Sin proveedor de visión. Agregá GEMINI_API_KEY (recomendado) o GROQ_API_KEY en .env y reiniciá npm run dev.',
+          'Sin proveedor de visión. Agregá GEMINI_API_KEY (recomendado), GROQ_API_KEY o NAN_API_KEY en .env y reiniciá npm run dev.',
         )
         break
       }

@@ -96,6 +96,6 @@ export async function ocrNotebookPage(
   errors.push('OCR local: sin Tesseract (PATH/TESSERACT_PATH) ni Windows OCR')
 
   throw new Error(
-    `No hay backend de visión usable. Poné GEMINI_API_KEY (Google AI Studio) o GROQ_API_KEY en .env. ${errors.join(' · ')}`,
+    `No hay backend de visión usable. Poné GEMINI_API_KEY (Google AI Studio), GROQ_API_KEY o NAN_API_KEY en .env. ${errors.join(' · ')}`,
   )
 }

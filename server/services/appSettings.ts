@@ -33,6 +33,45 @@ export type SlotCatalog = {
   providers: CatalogProvider[]
 }
 
+/** Tier member de NaN. `glm5.3` (premium) no se cataloga. */
+const NAN_MODEL = {
+  deepseek: {
+    id: 'deepseek-v4-flash',
+    label: 'DeepSeek V4 Flash (calidad + visión)',
+  },
+  gemma: {
+    id: 'gemma4',
+    label: 'Gemma 4 (sin medición, tareas cortas)',
+  },
+  qwen36: {
+    id: 'qwen3.6',
+    label: 'Qwen 3.6 (sin medición)',
+  },
+  glmFlash: {
+    id: 'glm5.3-flash',
+    label: 'GLM 5.3 Flash (agentes de código)',
+  },
+  mimo: { id: 'mimo-v2.6-flash', label: 'MiMo V2.6 Flash' },
+  qwen38: { id: 'qwen3.8-flash', label: 'Qwen 3.8 Flash' },
+} as const
+
+const NAN_MEMBER_MODELS: CatalogModel[] = [
+  NAN_MODEL.deepseek,
+  NAN_MODEL.gemma,
+  NAN_MODEL.qwen36,
+  NAN_MODEL.glmFlash,
+  NAN_MODEL.mimo,
+  NAN_MODEL.qwen38,
+]
+
+function nanProvider(firstId: string): CatalogProvider {
+  const models = [
+    ...NAN_MEMBER_MODELS.filter((m) => m.id === firstId),
+    ...NAN_MEMBER_MODELS.filter((m) => m.id !== firstId),
+  ]
+  return { id: 'nan', label: 'NaN (nan.builders)', models }
+}
+
 export const PROVIDER_CATALOG: SlotCatalog[] = [
   {
     slot: 'llm_main',
@@ -61,6 +100,7 @@ export const PROVIDER_CATALOG: SlotCatalog[] = [
         label: 'Stealth (OpenRouter)',
         models: [{ id: 'stealth/ox-alpha', label: 'Ox Alpha' }],
       },
+      nanProvider('deepseek-v4-flash'),
       {
         id: 'cohere',
         label: 'Cohere (opcional)',
@@ -100,6 +140,7 @@ export const PROVIDER_CATALOG: SlotCatalog[] = [
         label: 'Stealth (OpenRouter)',
         models: [{ id: 'stealth/ox-alpha', label: 'Ox Alpha' }],
       },
+      nanProvider('gemma4'),
       {
         id: 'cohere',
         label: 'Cohere',
@@ -145,6 +186,7 @@ export const PROVIDER_CATALOG: SlotCatalog[] = [
         label: 'Stealth (OpenRouter)',
         models: [{ id: 'stealth/ox-alpha', label: 'Ox Alpha' }],
       },
+      nanProvider('glm5.3-flash'),
       {
         id: 'cohere',
         label: 'Cohere',
@@ -194,6 +236,16 @@ export const PROVIDER_CATALOG: SlotCatalog[] = [
           },
           { id: 'google/gemini-2.0-flash-001', label: 'Gemini 2.0 Flash' },
           { id: 'stealth/ox-alpha', label: 'Ox Alpha' },
+        ],
+      },
+      {
+        id: 'nan',
+        label: 'NaN (nan.builders)',
+        models: [
+          {
+            id: 'deepseek-v4-flash',
+            label: 'DeepSeek V4 Flash (visión)',
+          },
         ],
       },
       {
@@ -303,6 +355,8 @@ export function hasProviderKey(providerId: string): boolean {
       return Boolean(env('GEMINI_API_KEY') || env('GOOGLE_API_KEY') || env('GOOGLE_GENERATIVE_AI_API_KEY'))
     case 'openrouter':
       return Boolean(env('OPENROUTER_API_KEY'))
+    case 'nan':
+      return Boolean(env('NAN_API_KEY'))
     case 'groq':
       return Boolean(env('GROQ_API_KEY'))
     case 'cohere':
@@ -322,6 +376,7 @@ export function keysPresent(): Record<string, boolean> {
   return {
     gemini: hasProviderKey('gemini'),
     openrouter: hasProviderKey('openrouter'),
+    nan: hasProviderKey('nan'),
     groq: hasProviderKey('groq'),
     ollama: true,
     cohere: hasProviderKey('cohere'),
@@ -342,6 +397,11 @@ function defaultModelFor(provider: string, slot: ProviderSlot): string {
   const entry = PROVIDER_CATALOG.find((c) => c.slot === slot)
   const prov = entry?.providers.find((p) => p.id === provider)
   if (prov?.models[0]?.id) return prov.models[0].id
+  if (provider === 'nan') {
+    if (slot === 'llm_fast') return 'gemma4'
+    if (slot === 'llm_sentinel') return 'glm5.3-flash'
+    return 'deepseek-v4-flash'
+  }
   if (provider === 'openrouter') {
     return env('OPENROUTER_MODEL', 'stealth/ox-alpha')
   }
@@ -374,12 +434,14 @@ function defaultModelFor(provider: string, slot: ProviderSlot): string {
   return ''
 }
 
-export function resolveSlot(slot: ProviderSlot): {
-  provider: string
-  model: string
-} {
-  const provider = getSetting(`provider.${slot}`, '')
-  const model = getSetting(`model.${slot}`, '')
+/** Elige proveedor/modelo sin leer SQLite. Los defaults de DB se pasan como stored*. */
+export function pickSlotRoute(
+  slot: ProviderSlot,
+  storedProvider: string,
+  storedModel: string,
+): { provider: string; model: string } {
+  const provider = storedProvider
+  const model = storedModel
   const entry = PROVIDER_CATALOG.find((c) => c.slot === slot)
   const allowed = entry?.providers.map((p) => p.id) ?? []
   const storedOk = Boolean(provider && allowed.includes(provider))
@@ -406,9 +468,21 @@ export function resolveSlot(slot: ProviderSlot): {
   }
 }
 
+export function resolveSlot(slot: ProviderSlot): {
+  provider: string
+  model: string
+} {
+  return pickSlotRoute(
+    slot,
+    getSetting(`provider.${slot}`, ''),
+    getSetting(`model.${slot}`, ''),
+  )
+}
+
 function apiKeyForProvider(provider: string): string {
   if (provider === 'gemini') return geminiApiKeyFromEnv()
   if (provider === 'openrouter') return env('OPENROUTER_API_KEY')
+  if (provider === 'nan') return env('NAN_API_KEY')
   if (provider === 'groq') return env('GROQ_API_KEY')
   if (provider === 'ollama') return ''
   return env('COHERE_API_KEY')
@@ -482,6 +556,21 @@ export function resolveLlmRoute(role: LlmRole): {
       provider,
       model: model || fallback,
       apiKey,
+    }
+  }
+  if (provider === 'nan') {
+    const fallback =
+      role === 'vision'
+        ? 'deepseek-v4-flash'
+        : role === 'fast'
+          ? 'gemma4'
+          : role === 'sentinel'
+            ? 'glm5.3-flash'
+            : 'deepseek-v4-flash'
+    return {
+      provider: 'nan',
+      model: model || fallback,
+      apiKey: env('NAN_API_KEY'),
     }
   }
   if (provider === 'groq') {
