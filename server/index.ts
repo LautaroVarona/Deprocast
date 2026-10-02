@@ -108,6 +108,7 @@ app.get('/api/health', (_req, res) => {
     ollama: true,
     cohere: caps.cohere,
     openrouter: caps.openrouter,
+    nan: caps.nan,
     deepgram: caps.deepgram,
     perplexity: caps.perplexity,
   })
@@ -173,6 +174,7 @@ const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`[deprocast] server listening on http://127.0.0.1:${PORT}`)
   console.log(`[deprocast] Cohere configured: ${caps.cohere}`)
   console.log(`[deprocast] OpenRouter configured: ${caps.openrouter}`)
+  console.log(`[deprocast] NaN configured: ${caps.nan}`)
   console.log(`[deprocast] Gemini configured: ${caps.gemini}`)
   console.log(`[deprocast] Groq configured: ${caps.groq}`)
   console.log('[deprocast] local token ready (no se imprime el valor)')

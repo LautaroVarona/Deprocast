@@ -1013,7 +1013,7 @@ export async function analyzeNotebookPage(
 ): Promise<import('../types.js').NotebookPageVisionResult> {
   if (!canCallLlm('vision') && listVisionRoutes().length === 0) {
     throw new Error(
-      'Falta API key de visión (GROQ_API_KEY, OPENROUTER_API_KEY o COHERE_API_KEY) en .env',
+      'Falta API key de visión (GROQ_API_KEY, OPENROUTER_API_KEY, NAN_API_KEY o COHERE_API_KEY) en .env',
     )
   }
   if (!fs.existsSync(imageAbsPath)) {

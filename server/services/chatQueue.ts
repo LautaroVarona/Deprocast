@@ -112,7 +112,7 @@ export function startChatProcess(opts?: {
       ...snapshot(),
       queued: 0,
       message:
-        'Configurá Groq, Cohere u OpenRouter: los quántomos se destilan con LLM',
+        'Configurá Groq, NaN, Cohere u OpenRouter: los quántomos se destilan con LLM',
     }
   }
 
