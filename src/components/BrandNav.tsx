@@ -162,15 +162,18 @@ export function BrandNav({
     if (!openId) return
     const onWin = () => placePanel()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenId(null)
+      if (e.key !== 'Escape' || e.repeat) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      setOpenId(null)
     }
     window.addEventListener('resize', onWin)
     window.addEventListener('scroll', onWin, true)
-    window.addEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey, true)
     return () => {
       window.removeEventListener('resize', onWin)
       window.removeEventListener('scroll', onWin, true)
-      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('keydown', onKey, true)
     }
   }, [openId, placePanel])
 

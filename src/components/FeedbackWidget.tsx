@@ -100,27 +100,24 @@ export function FeedbackWidget({ view }: Props) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
       if (e.repeat) return
-      if (open) {
+      const slash =
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        (e.key === '/' || e.code === 'Slash' || e.code === 'NumpadDivide')
+      if (slash) {
         e.preventDefault()
         e.stopPropagation()
-        close()
+        if (!open) openPanel()
         return
       }
-      const target = e.target
-      if (target instanceof HTMLElement) {
-        const tag = target.tagName
-        const typing =
-          tag === 'INPUT' ||
-          tag === 'TEXTAREA' ||
-          tag === 'SELECT' ||
-          target.isContentEditable
-        if (typing) return
-      }
+      // Escape cierra este panel. No lo abre: el megamenú y el resto de
+      // overlays usan Escape para dismiss, y este listener va en capture.
+      if (e.key !== 'Escape' || !open) return
+      if (document.querySelector('.nav-menu.is-open')) return
       e.preventDefault()
-      e.stopPropagation()
-      openPanel()
+      e.stopImmediatePropagation()
+      close()
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
@@ -210,7 +207,8 @@ export function FeedbackWidget({ view }: Props) {
         type="button"
         className="feedback-fab"
         aria-label="Abrir feedback"
-        title="Feedback (Esc)"
+        aria-keyshortcuts="Control+/"
+        title="Feedback (Ctrl+/)"
         onClick={() => (open ? close() : openPanel())}
       >
         !

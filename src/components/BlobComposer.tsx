@@ -88,8 +88,6 @@ export function BlobComposer({ onChanged }: Props) {
 
   useEffect(() => {
     void loadBlobs()
-    const t = window.setTimeout(() => taRef.current?.focus(), 80)
-    return () => window.clearTimeout(t)
   }, [loadBlobs])
 
   useEffect(() => {

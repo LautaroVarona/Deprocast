@@ -263,8 +263,6 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
         )}
       </header>
 
-      <BlobComposer onChanged={onChanged} />
-
       <div
         className="dropzone"
         onDragOver={(e) => e.preventDefault()}
@@ -403,6 +401,8 @@ export function FreeZone({ onProcessed, onChanged }: Props) {
           </ul>
         </div>
       )}
+
+      <BlobComposer onChanged={onChanged} />
     </section>
   )
 }

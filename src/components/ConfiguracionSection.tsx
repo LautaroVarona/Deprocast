@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, type ProviderConfigResponse } from '../services/api'
 
 type Slot = keyof ProviderConfigResponse['provider']
@@ -21,6 +21,68 @@ export function ConfiguracionSection({ refreshKey }: Props) {
   const [status, setStatus] = useState<string | null>(null)
 
   const [token, setToken] = useState<string | null>(null)
+  const [tokenRevealed, setTokenRevealed] = useState(false)
+  const [copyState, setCopyState] = useState<'ok' | 'err' | null>(null)
+  const hideTokenTimer = useRef<number | null>(null)
+
+  const clearHideTokenTimer = useCallback(() => {
+    if (hideTokenTimer.current != null) {
+      window.clearTimeout(hideTokenTimer.current)
+      hideTokenTimer.current = null
+    }
+  }, [])
+
+  const hideToken = useCallback(() => {
+    clearHideTokenTimer()
+    setTokenRevealed(false)
+  }, [clearHideTokenTimer])
+
+  const showToken = useCallback(() => {
+    clearHideTokenTimer()
+    setTokenRevealed(true)
+    hideTokenTimer.current = window.setTimeout(() => {
+      setTokenRevealed(false)
+      hideTokenTimer.current = null
+    }, 5000)
+  }, [clearHideTokenTimer])
+
+  useEffect(() => () => clearHideTokenTimer(), [clearHideTokenTimer])
+
+  const copyToken = useCallback(async () => {
+    if (!token) return
+    setCopyState(null)
+    const markCopied = () => {
+      setCopyState('ok')
+      window.setTimeout(() => setCopyState((s) => (s === 'ok' ? null : s)), 2000)
+    }
+    try {
+      await navigator.clipboard.writeText(token)
+      markCopied()
+      return
+    } catch {
+      /* el clipboard a veces pide permiso; el fallback no deja el secreto en pantalla */
+    }
+    const ta = document.createElement('textarea')
+    ta.value = token
+    ta.readOnly = true
+    ta.setAttribute('aria-hidden', 'true')
+    ta.tabIndex = -1
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    ta.style.pointerEvents = 'none'
+    document.body.appendChild(ta)
+    let ok = false
+    try {
+      ta.select()
+      ok = document.execCommand('copy')
+    } catch {
+      ok = false
+    } finally {
+      ta.remove()
+    }
+    if (ok) markCopied()
+    else setCopyState('err')
+  }, [token])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -32,12 +94,14 @@ export function ConfiguracionSection({ refreshKey }: Props) {
       setDraftModel({ ...res.model })
       const tok = await api.getLocalToken()
       setToken(tok.token)
+      setTokenRevealed(false)
+      clearHideTokenTimer()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [clearHideTokenTimer])
 
   useEffect(() => {
     void load()
@@ -107,8 +171,36 @@ export function ConfiguracionSection({ refreshKey }: Props) {
           <h3>Token local (El Cofre)</h3>
           <p className="muted">
             Copiá este token en el popup de la extensión. No lo subas a Git.
+            Mostrar lo enseña 5 segundos.
           </p>
-          <code className="config-token">{token}</code>
+          <div className="config-token-row">
+            <code
+              className={
+                tokenRevealed ? 'config-token' : 'config-token is-masked'
+              }
+              translate="no"
+              aria-label={tokenRevealed ? undefined : 'Token oculto'}
+            >
+              {tokenRevealed ? token : '••••••••••••••••'}
+            </code>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              onClick={() => (tokenRevealed ? hideToken() : showToken())}
+            >
+              {tokenRevealed ? 'Ocultar' : 'Mostrar'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-tiny"
+              onClick={() => void copyToken()}
+            >
+              {copyState === 'ok' ? 'Copiado' : 'Copiar'}
+            </button>
+          </div>
+          {copyState === 'err' && (
+            <p className="error">No se pudo copiar. Usá Mostrar y copiá a mano.</p>
+          )}
         </div>
       )}
 
